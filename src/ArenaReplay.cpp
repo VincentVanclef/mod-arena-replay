@@ -1197,42 +1197,6 @@ private:
     }
 };
 
-
-
-class PlayerGossip_ArenaReplayService final : public PlayerGossip
-{
-public:
-    enum Senders
-    {
-        ROOT = 100
-    };
-
-    PlayerGossip_ArenaReplayService() : PlayerGossip(91012)
-    {
-        RegisterAction(ROOT, OpenRoot);
-        RegisterAction(GOSSIP_SENDER_MAIN, DispatchSelect);
-        RegisterExtendedAction(GOSSIP_SENDER_MAIN, DispatchSelectCode);
-    }
-
-    static void OpenRoot(Player* player, int32, int32, std::any)
-    {
-        ReplayGossip script;
-        script.OnGossipHello(player, nullptr);
-    }
-
-    static void DispatchSelect(Player* player, int32 sender, int32 action, std::any)
-    {
-        ReplayGossip script;
-        script.OnGossipSelect(player, nullptr, uint32(sender), uint32(action));
-    }
-
-    static void DispatchSelectCode(Player* player, int32 sender, int32 action, std::string code, std::any)
-    {
-        ReplayGossip script;
-        script.OnGossipSelectCode(player, nullptr, uint32(sender), uint32(action), code.c_str());
-    }
-};
-
 namespace RTG::Services::ArenaReplay
 {
     bool Open(Player* player)
@@ -1242,8 +1206,9 @@ namespace RTG::Services::ArenaReplay
 
         player->PlayerTalkClass->ClearMenus();
         CloseGossipMenuFor(player);
-        sPlayerGossipMgr->ShowGossipMenu(player, 91012, PlayerGossip_ArenaReplayService::ROOT, 0);
-        return true;
+
+        ReplayGossip script;
+        return script.OnGossipHello(player, nullptr);
     }
 }
 
@@ -1254,5 +1219,4 @@ void AddArenaReplayScripts()
     new ArenaReplayBGScript();
     new ArenaReplayArenaScript();
     new ReplayGossip();
-    new PlayerGossip_ArenaReplayService();
 }
