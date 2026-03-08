@@ -1240,6 +1240,8 @@ namespace RTG::Services::ArenaReplay
         if (!player)
             return false;
 
+        player->PlayerTalkClass->ClearMenus();
+        CloseGossipMenuFor(player);
         sPlayerGossipMgr->ShowGossipMenu(player, 91012, PlayerGossip_ArenaReplayService::ROOT, 0);
         return true;
     }
