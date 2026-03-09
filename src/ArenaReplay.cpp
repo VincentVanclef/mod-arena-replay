@@ -1075,7 +1075,9 @@ private:
 
         MatchRecord record = loadedReplays[player->GetGUID().GetCounter()];
 
-        Battleground* bg = sBattlegroundMgr->CreateNewBattleground(record.typeId, GetBattlegroundBracketByLevel(record.mapId, sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL)), record.arenaTypeId, false);
+        // Use the spectator's real level bracket, not max level.
+        // Replays are spectator-only, but the battleground instance still needs a valid bracket/template.
+        Battleground* bg = sBattlegroundMgr->CreateNewBattleground(record.typeId, GetBattlegroundBracketByLevel(record.mapId, player->GetLevel()), record.arenaTypeId, false);
         if (!bg)
         {
             handler.PSendSysMessage("Couldn't create arena map!");
@@ -1094,7 +1096,10 @@ private:
         uint32 queueSlot = 0;
         WorldPacket data;
 
-        player->SetBattlegroundId(bg->GetInstanceID(), bgTypeId, queueSlot, true, false, TEAM_NEUTRAL);
+        // TEAM_NEUTRAL can leave the replay instance without a valid team start location on some maps,
+        // which can cascade into bad teleports/homebinds. Keep the player on their real faction team
+        // while still marking them as spectator via SetPendingSpectatorForBG().
+        player->SetBattlegroundId(bg->GetInstanceID(), bgTypeId, queueSlot, true, false, teamId);
         player->SetEntryPoint();
         sBattlegroundMgr->SendToBattleground(player, bg->GetInstanceID(), bgTypeId);
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, queueSlot, STATUS_IN_PROGRESS, 0, bg->GetStartTime(), bg->GetArenaType(), teamId);
