@@ -506,6 +506,10 @@ private:
     }
 };
 
+
+static constexpr uint32 REPLAY_GOSSIP_SENDER_SELECT = GOSSIP_SENDER_MAIN;
+static constexpr uint32 REPLAY_GOSSIP_SENDER_CODE   = 1001;
+
 enum ReplayGossips
 {
     REPLAY_LATEST_2V2 = 1,
@@ -542,33 +546,33 @@ public:
         const bool isArena3v3soloQEnabled = sConfigMgr->GetOption<bool>("ArenaReplay.3v3soloQ.Enable", false);
 
         if (isArena1v1Enabled)
-            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 1v1 games of the last 30 days", GOSSIP_SENDER_MAIN, REPLAY_LATEST_1V1);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 1v1 games of the last 30 days", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_LATEST_1V1);
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 2v2 games of the last 30 days", GOSSIP_SENDER_MAIN, REPLAY_LATEST_2V2);
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 games of the last 30 days", GOSSIP_SENDER_MAIN, REPLAY_LATEST_3V3);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 2v2 games of the last 30 days", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_LATEST_2V2);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 games of the last 30 days", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_LATEST_3V3);
 
         if (isArena3v3soloQEnabled)
-            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 Solo games of the last 30 days", GOSSIP_SENDER_MAIN, REPLAY_LATEST_3V3SOLO);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 Solo games of the last 30 days", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_LATEST_3V3SOLO);
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 5v5 games of the last 30 days", GOSSIP_SENDER_MAIN, REPLAY_LATEST_5V5);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 5v5 games of the last 30 days", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_LATEST_5V5);
 
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay a Match ID", GOSSIP_SENDER_MAIN, REPLAY_MATCH_ID, "", 0, true);             // maybe add command .replay 'replayID' aswell
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay list by player name", GOSSIP_SENDER_MAIN, REPLAY_LIST_BY_PLAYERNAME, "", 0, true); // to do: show a list, showing games with type, teamname and teamrating
-        AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "My favorite matches", GOSSIP_SENDER_MAIN, MY_FAVORITE_MATCHES);                   // To do: somehow show teamName/TeamRating/Classes (it's a different db table)
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay a Match ID", REPLAY_GOSSIP_SENDER_CODE, REPLAY_MATCH_ID, "", 0, true);             // maybe add command .replay 'replayID' aswell
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay list by player name", REPLAY_GOSSIP_SENDER_CODE, REPLAY_LIST_BY_PLAYERNAME, "", 0, true); // to do: show a list, showing games with type, teamname and teamrating
+        AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "My favorite matches", REPLAY_GOSSIP_SENDER_SELECT, MY_FAVORITE_MATCHES);                   // To do: somehow show teamName/TeamRating/Classes (it's a different db table)
 
         if (isArena1v1Enabled)
-            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 1v1 games of all time", GOSSIP_SENDER_MAIN, REPLAY_TOP_1V1_ALLTIME);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 1v1 games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_TOP_1V1_ALLTIME);
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 2v2 games of all time", GOSSIP_SENDER_MAIN, REPLAY_TOP_2V2_ALLTIME);
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 games of all time", GOSSIP_SENDER_MAIN, REPLAY_TOP_3V3_ALLTIME);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 2v2 games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_TOP_2V2_ALLTIME);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_TOP_3V3_ALLTIME);
 
         if (isArena3v3soloQEnabled)
-            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 Solo games of all time", GOSSIP_SENDER_MAIN, REPLAY_TOP_3V3SOLO_ALLTIME);
+            AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 3v3 Solo games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_TOP_3V3SOLO_ALLTIME);
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 5v5 games of all time", GOSSIP_SENDER_MAIN, REPLAY_TOP_5V5_ALLTIME);
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay top 5v5 games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_TOP_5V5_ALLTIME);
 
 
-        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay most watched games of all time", GOSSIP_SENDER_MAIN, REPLAY_MOST_WATCHED_ALLTIME);  // To Do: show arena type + watchedTimes, maybe hide team name
+        AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay most watched games of all time", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_MOST_WATCHED_ALLTIME);  // To Do: show arena type + watchedTimes, maybe hide team name
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature ? creature->GetGUID() : player->GetGUID());
 
         return true;
@@ -948,7 +952,7 @@ private:
 
     void ShowReplays(Player* player, Creature* creature, std::vector<ReplayInfo> matchInfos) {
         if (matchInfos.empty())
-            AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No replays found.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+            AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No replays found.", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         else
         {
             AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "[Replay ID] (Team Rating) 'Team Name'\n----------------------------------------------", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF); // Back to Main Menu
@@ -956,11 +960,11 @@ private:
             {
                 const std::string gossipText = GetGossipText(info);
                 const uint32 actionOffset = GOSSIP_ACTION_INFO_DEF + 30;
-                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, gossipText, GOSSIP_SENDER_MAIN, actionOffset + info.matchId);
+                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, gossipText, REPLAY_GOSSIP_SENDER_SELECT, actionOffset + info.matchId);
             }
         }
 
-        AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Back", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+        AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Back", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature ? creature->GetGUID() : player->GetGUID());
     }
 
@@ -999,12 +1003,12 @@ private:
 
     void ShowSavedReplays(Player* player, Creature* creature, bool firstPage = true)
     {
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Favorite a Match ID", GOSSIP_SENDER_MAIN, MY_FAVORITE_MATCHES, "", 0, true);
+        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Favorite a Match ID", REPLAY_GOSSIP_SENDER_CODE, MY_FAVORITE_MATCHES, "", 0, true);
 
         std::string sortOrder = (firstPage) ? "ASC" : "DESC";
         QueryResult result = CharacterDatabase.Query("SELECT replay_id FROM character_saved_replays WHERE character_id = " + std::to_string(player->GetGUID().GetCounter()) + " ORDER BY id " + sortOrder + " LIMIT 29");
         if (!result)
-            AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No saved replays found.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+            AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No saved replays found.", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         else
         {
             do
@@ -1015,7 +1019,7 @@ private:
 
                 uint32 matchId = fields[0].Get<uint32>();
                 const uint32 actionOffset = GOSSIP_ACTION_INFO_DEF + 30;
-                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay match " + std::to_string(matchId), GOSSIP_SENDER_MAIN, actionOffset + matchId);
+                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay match " + std::to_string(matchId), REPLAY_GOSSIP_SENDER_SELECT, actionOffset + matchId);
 
             } while (result->NextRow());
 
@@ -1024,7 +1028,7 @@ private:
                 //AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Next Page", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
             }
         }
-        AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Back", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF);
+        AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Back", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature ? creature->GetGUID() : player->GetGUID());
     }
 
@@ -1197,6 +1201,42 @@ private:
     }
 };
 
+class PlayerGossip_ArenaReplayService final : public PlayerGossip
+{
+public:
+    enum Senders
+    {
+        ROOT = 100,
+        SELECT = REPLAY_GOSSIP_SENDER_SELECT,
+        CODE = REPLAY_GOSSIP_SENDER_CODE
+    };
+
+    PlayerGossip_ArenaReplayService() : PlayerGossip(91012)
+    {
+        RegisterAction(ROOT, OpenRoot);
+        RegisterAction(SELECT, DispatchSelect);
+        RegisterExtendedAction(CODE, DispatchSelectCode);
+    }
+
+    static void OpenRoot(Player* player, int32, int32, std::any)
+    {
+        ReplayGossip script;
+        script.OnGossipHello(player, nullptr);
+    }
+
+    static void DispatchSelect(Player* player, int32 sender, int32 action, std::any)
+    {
+        ReplayGossip script;
+        script.OnGossipSelect(player, nullptr, uint32(sender), uint32(action));
+    }
+
+    static void DispatchSelectCode(Player* player, int32 sender, int32 action, std::string code, std::any)
+    {
+        ReplayGossip script;
+        script.OnGossipSelectCode(player, nullptr, uint32(sender), uint32(action), code.c_str());
+    }
+};
+
 namespace RTG::Services::ArenaReplay
 {
     bool Open(Player* player)
@@ -1207,8 +1247,8 @@ namespace RTG::Services::ArenaReplay
         player->PlayerTalkClass->ClearMenus();
         CloseGossipMenuFor(player);
 
-        ReplayGossip script;
-        return script.OnGossipHello(player, nullptr);
+        sPlayerGossipMgr->ShowGossipMenu(player, 91012, PlayerGossip_ArenaReplayService::ROOT, 0);
+        return true;
     }
 }
 
@@ -1219,4 +1259,5 @@ void AddArenaReplayScripts()
     new ArenaReplayBGScript();
     new ArenaReplayArenaScript();
     new ReplayGossip();
+    new PlayerGossip_ArenaReplayService();
 }
