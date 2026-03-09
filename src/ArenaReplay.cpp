@@ -1207,19 +1207,15 @@ public:
     enum Senders
     {
         ROOT = 1000,
-        EXTENDED_INPUT = 1001
-    };
-
-    struct ReplayCodeRequest
-    {
-        uint32 sender;
-        uint32 action;
+        LEGACY_SELECT = GOSSIP_SENDER_MAIN,
+        LEGACY_CODE = 1001
     };
 
     PlayerGossip_ArenaReplayService() : PlayerGossip(91012)
     {
         RegisterAction(ROOT, OpenRoot);
-        RegisterExtendedAction(EXTENDED_INPUT, DispatchSelectCode);
+        RegisterAction(LEGACY_SELECT, DispatchSelect);
+        RegisterExtendedAction(LEGACY_CODE, DispatchSelectCode);
     }
 
     static void OpenRoot(Player* player, int32, int32, std::any)
@@ -1228,15 +1224,16 @@ public:
         script.OnGossipHello(player, nullptr);
     }
 
-    static void DispatchSelectCode(Player* player, int32, int32, std::string code, std::any payload)
+    static void DispatchSelect(Player* player, int32 sender, int32 action, std::any)
     {
         ReplayGossip script;
+        script.OnGossipSelect(player, nullptr, uint32(sender), uint32(action));
+    }
 
-        ReplayCodeRequest req { uint32(GOSSIP_SENDER_MAIN), 0u };
-        if (payload.has_value())
-            req = std::any_cast<ReplayCodeRequest>(payload);
-
-        script.OnGossipSelectCode(player, nullptr, req.sender, req.action, code.c_str());
+    static void DispatchSelectCode(Player* player, int32 sender, int32 action, std::string code, std::any)
+    {
+        ReplayGossip script;
+        script.OnGossipSelectCode(player, nullptr, uint32(sender), uint32(action), code.c_str());
     }
 };
 
