@@ -5,3 +5,7 @@ CREATE TABLE IF NOT EXISTS `character_saved_replays` (
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `unique_saved_replay`(`character_id` ASC, `replay_id` ASC) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = Dynamic;
+
+
+ALTER TABLE `character_saved_replays`
+  ADD INDEX `idx_replay_id` (`replay_id`);

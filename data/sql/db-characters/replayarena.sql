@@ -13,7 +13,19 @@ CREATE TABLE IF NOT EXISTS `character_arena_replays` (
   `loserTeamMMR` INT NULL DEFAULT NULL,
   `winnerPlayerGuids` VARCHAR(255) NULL DEFAULT NULL,
   `loserPlayerGuids` VARCHAR(255) NULL DEFAULT NULL,
+  `winnerCameraTrack` LONGTEXT NULL,
+  `loserCameraTrack` LONGTEXT NULL,
+  `winnerActorTrack` LONGTEXT NULL,
+  `loserActorTrack` LONGTEXT NULL,
   `timesWatched` INT NOT NULL DEFAULT 0,
   `timestamp` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE
 ) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_unicode_ci ROW_FORMAT = DYNAMIC;
+
+
+-- Existing installs should add these columns manually if the table already exists:
+-- ALTER TABLE `character_arena_replays` ADD COLUMN `winnerCameraTrack` LONGTEXT NULL AFTER `loserPlayerGuids`;
+-- ALTER TABLE `character_arena_replays` ADD COLUMN `loserCameraTrack` LONGTEXT NULL AFTER `winnerCameraTrack`;
+
+-- ALTER TABLE `character_arena_replays` ADD COLUMN `winnerActorTrack` LONGTEXT NULL AFTER `loserCameraTrack`;
+-- ALTER TABLE `character_arena_replays` ADD COLUMN `loserActorTrack` LONGTEXT NULL AFTER `winnerActorTrack`;

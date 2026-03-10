@@ -28,3 +28,23 @@ I need to change it so that it uses new duplicate players instead of"
 - thomasjteachey
 - Laasker
 - Helias
+
+
+## RTG modernization notes
+
+This branch adds a new **Replay Actor Spectate** layer. It does not yet spawn fully remapped clone units, but it records per-combatant actor tracks and uses them to drive a spectator follow camera that auto-cycles targets. That makes self-watch dramatically safer than the legacy packet-only camera path and moves the module closer to a future full clone-target implementation.
+
+### New replay data
+- `winnerActorTrack`
+- `loserActorTrack`
+
+### New config
+- `ArenaReplay.ActorSpectate.Enable`
+- `ArenaReplay.ActorSpectate.AutoCycleMs`
+- `ArenaReplay.ActorSpectate.FollowDistance`
+- `ArenaReplay.ActorSpectate.FollowHeight`
+- `ArenaReplay.ActorSpectate.StartOnWinnerTeam`
+- `ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant`
+
+### Important limitation
+This is **clone-target spectating scaffolding**, not the final cloned-actor / GUID-remap engine. The camera now follows recorded participant tracks instead of relying only on winner/loser POV anchor tracks, but it still does not spawn fully remapped duplicate units yet.

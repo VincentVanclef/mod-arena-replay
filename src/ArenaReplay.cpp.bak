@@ -16,12 +16,7 @@
 #include "PlayerGossipMgr.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
-#include <cmath>
-#include <map>
-#include <algorithm>
-#include <cctype>
 #include <iomanip>
-#include <sstream>
 #include <unordered_map>
 
 std::vector<Opcodes> watchList =
@@ -97,70 +92,14 @@ CMSG_ATTACKSWING
 CMSG_ATTACKSTOP*/
 
 struct PacketRecord { uint32 timestamp; WorldPacket packet; };
-struct CameraKeyframe
-{
-    uint32 timestamp = 0;
-    Position position;
-};
-struct ActorKeyframe
-{
-    uint32 timestamp = 0;
-    Position position;
-};
-struct ReplayActorTrack
-{
-    uint64 playerGuid = 0;
-    uint8 playerClass = 0;
-    uint8 race = 0;
-    uint8 gender = 0;
-    std::string playerName;
-    std::vector<ActorKeyframe> frames;
-};
-struct MatchRecord
-{
-    BattlegroundTypeId typeId;
-    uint8 arenaTypeId;
-    uint32 mapId;
-    std::deque<PacketRecord> packets;
-    std::vector<uint64> winnerPlayerGuidList;
-    std::vector<uint64> loserPlayerGuidList;
-    std::vector<CameraKeyframe> allianceCameraTrack;
-    std::vector<CameraKeyframe> hordeCameraTrack;
-    std::vector<CameraKeyframe> winnerCameraTrack;
-    std::vector<CameraKeyframe> loserCameraTrack;
-    std::vector<ReplayActorTrack> allianceActorTracks;
-    std::vector<ReplayActorTrack> hordeActorTracks;
-    std::vector<ReplayActorTrack> winnerActorTracks;
-    std::vector<ReplayActorTrack> loserActorTracks;
-    uint32 nextCameraSampleMs = 0;
-};
+struct MatchRecord { BattlegroundTypeId typeId; uint8 arenaTypeId; uint32 mapId; std::deque<PacketRecord> packets; };
 struct BgPlayersGuids { std::string alliancePlayerGuids; std::string hordePlayerGuids; };
 struct TeamRecorders { ObjectGuid alliance; ObjectGuid horde; };
-struct ActiveReplaySession
-{
-    uint32 battlegroundInstanceId = 0;
-    uint32 replayId = 0;
-    uint32 anchorMapId = 0;
-    Position anchorPosition;
-    uint32 nextAnchorEnforceMs = 0;
-    bool movementLocked = false;
-    bool viewerWasParticipant = false;
-    bool useRecordedCamera = false;
-    bool cameraUseWinnerTrack = true;
-    bool actorSpectateEnabled = false;
-    bool actorUseWinnerTeam = true;
-    uint32 nextCameraSwitchMs = 0;
-    uint32 nextActorSwitchMs = 0;
-    uint32 currentCameraIndex = 0;
-    uint32 currentActorIndex = 0;
-    uint64 currentActorGuid = 0;
-};
 std::unordered_map<uint32, MatchRecord> records;
 std::unordered_map<uint64, MatchRecord> loadedReplays;
 std::unordered_map<uint32, uint32> bgReplayIds;
 std::unordered_map<uint32, BgPlayersGuids> bgPlayersGuids;
 std::unordered_map<uint32, TeamRecorders> bgRecorders;
-std::unordered_map<uint64, ActiveReplaySession> activeReplaySessions;
 
 namespace
 {
@@ -195,384 +134,6 @@ namespace
             slot = player->GetGUID();
 
         return slot;
-    }
-
-    static std::string Trim(std::string value)
-    {
-        auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-        value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
-        value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
-        return value;
-    }
-
-    static void AppendGuidCsv(std::string& dest, uint64 guid)
-    {
-        if (!dest.empty())
-            dest += ",";
-
-        dest += std::to_string(guid);
-    }
-
-    static std::vector<uint64> ParseGuidCsv(std::string const& input)
-    {
-        std::vector<uint64> guids;
-        std::stringstream ss(input);
-        std::string token;
-        while (std::getline(ss, token, ','))
-        {
-            token = Trim(token);
-            if (token.empty())
-                continue;
-
-            try
-            {
-                guids.push_back(std::stoull(token));
-            }
-            catch (...)
-            {
-            }
-        }
-        return guids;
-    }
-
-    static bool VectorContainsGuid(std::vector<uint64> const& guids, uint64 guid)
-    {
-        return std::find(guids.begin(), guids.end(), guid) != guids.end();
-    }
-
-    static Player* FindBattlegroundPlayer(Battleground* bg, ObjectGuid guid)
-    {
-        if (!bg || !guid)
-            return nullptr;
-
-        for (auto const& it : bg->GetPlayers())
-            if (it.second && it.second->GetGUID() == guid)
-                return it.second;
-
-        return nullptr;
-    }
-
-    static void SampleCameraTrack(std::vector<CameraKeyframe>& track, Player* player, uint32 timestamp)
-    {
-        if (!player)
-            return;
-
-        if (!track.empty() && timestamp <= track.back().timestamp)
-            return;
-
-        CameraKeyframe frame;
-        frame.timestamp = timestamp;
-        frame.position.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
-        track.push_back(frame);
-    }
-
-    static std::string SerializeCameraTrack(std::vector<CameraKeyframe> const& track)
-    {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(3);
-        for (CameraKeyframe const& frame : track)
-        {
-            if (out.tellp() > 0)
-                out << ';';
-
-            out << frame.timestamp << ':'
-                << frame.position.GetPositionX() << ':'
-                << frame.position.GetPositionY() << ':'
-                << frame.position.GetPositionZ() << ':'
-                << frame.position.GetOrientation();
-        }
-        return out.str();
-    }
-
-    static std::vector<CameraKeyframe> DeserializeCameraTrack(std::string const& input)
-    {
-        std::vector<CameraKeyframe> track;
-        std::stringstream ss(input);
-        std::string token;
-        while (std::getline(ss, token, ';'))
-        {
-            if (token.empty())
-                continue;
-
-            std::stringstream part(token);
-            std::string bits[5];
-            bool ok = true;
-            for (std::string& bit : bits)
-            {
-                if (!std::getline(part, bit, ':'))
-                {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if (!ok)
-                continue;
-
-            try
-            {
-                CameraKeyframe frame;
-                frame.timestamp = uint32(std::stoul(bits[0]));
-                frame.position.Relocate(std::stof(bits[1]), std::stof(bits[2]), std::stof(bits[3]), std::stof(bits[4]));
-                track.push_back(frame);
-            }
-            catch (...)
-            {
-            }
-        }
-        return track;
-    }
-
-    static Position GetCameraPositionForTime(std::vector<CameraKeyframe> const& track, uint32 now)
-    {
-        if (track.empty())
-            return Position();
-
-        size_t idx = 0;
-        for (size_t i = 1; i < track.size(); ++i)
-        {
-            if (track[i].timestamp > now)
-                break;
-            idx = i;
-        }
-
-        return track[idx].position;
-    }
-
-    static void SampleActorTrack(std::vector<ReplayActorTrack>& tracks, Player* player, uint32 timestamp)
-    {
-        if (!player)
-            return;
-
-        auto it = std::find_if(tracks.begin(), tracks.end(), [player](ReplayActorTrack const& track)
-        {
-            return track.playerGuid == player->GetGUID().GetRawValue();
-        });
-
-        if (it == tracks.end())
-        {
-            ReplayActorTrack track;
-            track.playerGuid = player->GetGUID().GetRawValue();
-            track.playerClass = player->getClass();
-            track.race = player->getRace();
-            track.gender = player->getGender();
-            track.playerName = player->GetName();
-            tracks.push_back(std::move(track));
-            it = std::prev(tracks.end());
-        }
-
-        if (!it->frames.empty() && timestamp <= it->frames.back().timestamp)
-            return;
-
-        ActorKeyframe frame;
-        frame.timestamp = timestamp;
-        frame.position.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
-        it->frames.push_back(frame);
-    }
-
-    static std::string EscapeActorField(std::string value)
-    {
-        std::replace(value.begin(), value.end(), ';', '_');
-        std::replace(value.begin(), value.end(), '@', '_');
-        std::replace(value.begin(), value.end(), '|', '_');
-        std::replace(value.begin(), value.end(), ',', '_');
-        std::replace(value.begin(), value.end(), ':', '_');
-        return value;
-    }
-
-    static std::string SerializeActorTracks(std::vector<ReplayActorTrack> const& tracks)
-    {
-        std::ostringstream out;
-        out << std::fixed << std::setprecision(3);
-        for (ReplayActorTrack const& track : tracks)
-        {
-            if (track.frames.empty())
-                continue;
-
-            if (out.tellp() > 0)
-                out << ';';
-
-            out << track.playerGuid << ',' << uint32(track.playerClass) << ',' << uint32(track.race) << ',' << uint32(track.gender) << ',' << EscapeActorField(track.playerName) << '@';
-            for (size_t i = 0; i < track.frames.size(); ++i)
-            {
-                ActorKeyframe const& frame = track.frames[i];
-                if (i > 0)
-                    out << '|';
-
-                out << frame.timestamp << ':'
-                    << frame.position.GetPositionX() << ':'
-                    << frame.position.GetPositionY() << ':'
-                    << frame.position.GetPositionZ() << ':'
-                    << frame.position.GetOrientation();
-            }
-        }
-        return out.str();
-    }
-
-    static std::vector<ReplayActorTrack> DeserializeActorTracks(std::string const& input)
-    {
-        std::vector<ReplayActorTrack> tracks;
-        std::stringstream ss(input);
-        std::string token;
-        while (std::getline(ss, token, ';'))
-        {
-            if (token.empty())
-                continue;
-
-            size_t atPos = token.find('@');
-            if (atPos == std::string::npos)
-                continue;
-
-            std::string header = token.substr(0, atPos);
-            std::string body = token.substr(atPos + 1);
-
-            std::stringstream hs(header);
-            std::string parts[5];
-            bool ok = true;
-            for (std::string& part : parts)
-            {
-                if (!std::getline(hs, part, ','))
-                {
-                    ok = false;
-                    break;
-                }
-            }
-
-            if (!ok)
-                continue;
-
-            ReplayActorTrack track;
-            try
-            {
-                track.playerGuid = std::stoull(parts[0]);
-                track.playerClass = uint8(std::stoul(parts[1]));
-                track.race = uint8(std::stoul(parts[2]));
-                track.gender = uint8(std::stoul(parts[3]));
-                track.playerName = parts[4];
-            }
-            catch (...)
-            {
-                continue;
-            }
-
-            std::stringstream fs(body);
-            std::string frameToken;
-            while (std::getline(fs, frameToken, '|'))
-            {
-                if (frameToken.empty())
-                    continue;
-
-                std::stringstream ps(frameToken);
-                std::string values[5];
-                bool frameOk = true;
-                for (std::string& value : values)
-                {
-                    if (!std::getline(ps, value, ':'))
-                    {
-                        frameOk = false;
-                        break;
-                    }
-                }
-
-                if (!frameOk)
-                    continue;
-
-                try
-                {
-                    ActorKeyframe frame;
-                    frame.timestamp = uint32(std::stoul(values[0]));
-                    frame.position.Relocate(std::stof(values[1]), std::stof(values[2]), std::stof(values[3]), std::stof(values[4]));
-                    track.frames.push_back(frame);
-                }
-                catch (...)
-                {
-                }
-            }
-
-            if (!track.frames.empty())
-                tracks.push_back(std::move(track));
-        }
-
-        return tracks;
-    }
-
-    static Position GetActorPositionForTime(ReplayActorTrack const& track, uint32 now)
-    {
-        if (track.frames.empty())
-            return Position();
-
-        size_t idx = 0;
-        for (size_t i = 1; i < track.frames.size(); ++i)
-        {
-            if (track.frames[i].timestamp > now)
-                break;
-            idx = i;
-        }
-
-        return track.frames[idx].position;
-    }
-
-    static Position BuildFollowCameraPosition(Position const& targetPos)
-    {
-        float followDistance = std::max(2.0f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowDistance", 8.0f));
-        float followHeight = std::max(1.0f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowHeight", 3.0f));
-        constexpr float kPi = 3.14159265f;
-        float angle = targetPos.GetOrientation() + kPi;
-
-        Position cameraPos;
-        cameraPos.Relocate(
-            targetPos.GetPositionX() + std::cos(angle) * followDistance,
-            targetPos.GetPositionY() + std::sin(angle) * followDistance,
-            targetPos.GetPositionZ() + followHeight,
-            targetPos.GetOrientation());
-        return cameraPos;
-    }
-
-    static std::vector<ReplayActorTrack> const& GetActiveActorTracks(MatchRecord const& match, ActiveReplaySession const& session)
-    {
-        if (session.actorUseWinnerTeam || match.loserActorTracks.empty())
-            return match.winnerActorTracks;
-
-        return match.loserActorTracks;
-    }
-
-    static ReplayActorTrack const* GetActorTrackByIndex(std::vector<ReplayActorTrack> const& tracks, uint32 index)
-    {
-        if (tracks.empty())
-            return nullptr;
-
-        return &tracks[index % tracks.size()];
-    }
-
-    static void ReleaseReplayViewerControl(Player* player)
-    {
-        if (!player)
-            return;
-
-        auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
-        if (it != activeReplaySessions.end() && it->second.movementLocked)
-            player->SetClientControl(player, true);
-
-        activeReplaySessions.erase(player->GetGUID().GetCounter());
-    }
-
-    static void LockReplayViewerControl(Player* player, uint32 replayId)
-    {
-        if (!player)
-            return;
-
-        ActiveReplaySession& session = activeReplaySessions[player->GetGUID().GetCounter()];
-        session.battlegroundInstanceId = player->GetBattlegroundId();
-        session.replayId = replayId;
-        session.anchorMapId = player->GetMapId();
-        session.anchorPosition.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
-        session.nextAnchorEnforceMs = 0;
-
-        if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
-        {
-            player->SetClientControl(player, false);
-            session.movementLocked = true;
-        }
     }
 }
 
@@ -654,53 +215,14 @@ public:
     void OnBattlegroundUpdate(Battleground* bg, uint32 /* diff */) override
     {
         const bool isReplay = bgReplayIds.find(bg->GetInstanceID()) != bgReplayIds.end();
+        if (!isReplay)
+            return;
 
         if (!bg->isArena() && !sConfigMgr->GetOption<bool>("ArenaReplay.SaveBattlegrounds", true))
             return;
 
         if (!bg->isRated() && !sConfigMgr->GetOption<bool>("ArenaReplay.SaveUnratedArenas", true))
             return;
-
-        if (!isReplay)
-        {
-            if (bg->GetStatus() != BattlegroundStatus::STATUS_IN_PROGRESS)
-                return;
-
-            auto recIt = records.find(bg->GetInstanceID());
-            if (recIt == records.end())
-                return;
-
-            MatchRecord& live = recIt->second;
-            uint32 sampleMs = std::max<uint32>(100, sConfigMgr->GetOption<uint32>("ArenaReplay.CameraPOV.SampleMs", 250));
-            if (live.nextCameraSampleMs > bg->GetStartTime())
-                return;
-
-            live.nextCameraSampleMs = bg->GetStartTime() + sampleMs;
-
-            auto recorderIt = bgRecorders.find(bg->GetInstanceID());
-            if (recorderIt != bgRecorders.end())
-            {
-                if (Player* allianceRecorder = FindBattlegroundPlayer(bg, recorderIt->second.alliance))
-                    SampleCameraTrack(live.allianceCameraTrack, allianceRecorder, bg->GetStartTime());
-
-                if (Player* hordeRecorder = FindBattlegroundPlayer(bg, recorderIt->second.horde))
-                    SampleCameraTrack(live.hordeCameraTrack, hordeRecorder, bg->GetStartTime());
-            }
-
-            for (auto const& playerPair : bg->GetPlayers())
-            {
-                Player* actor = playerPair.second;
-                if (!actor || actor->IsSpectator())
-                    continue;
-
-                if (actor->GetBgTeamId() == TEAM_ALLIANCE)
-                    SampleActorTrack(live.allianceActorTracks, actor, bg->GetStartTime());
-                else
-                    SampleActorTrack(live.hordeActorTracks, actor, bg->GetStartTime());
-            }
-
-            return;
-        }
 
         uint32 replayId = bgReplayIds.at(bg->GetInstanceID());
 
@@ -724,88 +246,22 @@ public:
         // if replay ends or spectator left > free arena replay data and/or kick player
         if (match.packets.empty() || bg->GetPlayers().empty())
         {
-            if (!bg->GetPlayers().empty())
-            {
-                Player* replayer = bg->GetPlayers().begin()->second;
-                ReleaseReplayViewerControl(replayer);
-                replayer->LeaveBattleground(bg);
-            }
-
             loadedReplays.erase(it);
+
+            if (!bg->GetPlayers().empty())
+                bg->GetPlayers().begin()->second->LeaveBattleground(bg);
+
             return;
-        }
-
-        Player* replayer = bg->GetPlayers().begin()->second;
-        auto sessionIt = activeReplaySessions.find(replayer->GetGUID().GetCounter());
-        if (sessionIt != activeReplaySessions.end())
-        {
-            ActiveReplaySession& session = sessionIt->second;
-            if (session.actorSpectateEnabled)
-            {
-                if (session.nextActorSwitchMs <= bg->GetStartTime())
-                {
-                    session.nextActorSwitchMs = bg->GetStartTime() + std::max<uint32>(1000, sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.AutoCycleMs", 7000));
-                    std::vector<ReplayActorTrack> const& winnerTracks = match.winnerActorTracks;
-                    std::vector<ReplayActorTrack> const& loserTracks = match.loserActorTracks;
-                    std::vector<ReplayActorTrack> const& activeTracks = GetActiveActorTracks(match, session);
-
-                    if (!activeTracks.empty())
-                        session.currentActorIndex = (session.currentActorIndex + 1) % activeTracks.size();
-
-                    if (!winnerTracks.empty() && !loserTracks.empty())
-                        session.actorUseWinnerTeam = !session.actorUseWinnerTeam;
-                }
-
-                std::vector<ReplayActorTrack> const& activeTracks = GetActiveActorTracks(match, session);
-                if (ReplayActorTrack const* actorTrack = GetActorTrackByIndex(activeTracks, session.currentActorIndex))
-                {
-                    session.currentActorGuid = actorTrack->playerGuid;
-                    Position actorPos = GetActorPositionForTime(*actorTrack, bg->GetStartTime());
-                    Position cameraPos = BuildFollowCameraPosition(actorPos);
-                    if (replayer->GetMapId() == bg->GetMapId())
-                        replayer->NearTeleportTo(cameraPos.GetPositionX(), cameraPos.GetPositionY(), cameraPos.GetPositionZ(), cameraPos.GetOrientation());
-                }
-            }
-            else if (session.useRecordedCamera)
-            {
-                if (session.nextCameraSwitchMs <= bg->GetStartTime())
-                {
-                    session.nextCameraSwitchMs = bg->GetStartTime() + std::max<uint32>(1000, sConfigMgr->GetOption<uint32>("ArenaReplay.CameraPOV.SwitchMs", 8000));
-                    if (!match.winnerCameraTrack.empty() && !match.loserCameraTrack.empty())
-                        session.cameraUseWinnerTrack = !session.cameraUseWinnerTrack;
-                }
-
-                std::vector<CameraKeyframe> const& activeTrack = session.cameraUseWinnerTrack || match.loserCameraTrack.empty()
-                    ? match.winnerCameraTrack
-                    : match.loserCameraTrack;
-
-                if (!activeTrack.empty())
-                {
-                    Position cameraPos = GetCameraPositionForTime(activeTrack, bg->GetStartTime());
-                    if (replayer->GetMapId() == bg->GetMapId())
-                        replayer->NearTeleportTo(cameraPos.GetPositionX(), cameraPos.GetPositionY(), cameraPos.GetPositionZ(), cameraPos.GetOrientation());
-                }
-            }
-            else if (session.nextAnchorEnforceMs <= bg->GetStartTime())
-            {
-                session.nextAnchorEnforceMs = bg->GetStartTime() + 500;
-
-                if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.AnchorViewer", true) && replayer->GetMapId() == session.anchorMapId)
-                {
-                    float dx = replayer->GetPositionX() - session.anchorPosition.GetPositionX();
-                    float dy = replayer->GetPositionY() - session.anchorPosition.GetPositionY();
-                    float dz = replayer->GetPositionZ() - session.anchorPosition.GetPositionZ();
-                    float distSq = dx * dx + dy * dy + dz * dz;
-                    if (distSq > 1.0f)
-                        replayer->NearTeleportTo(session.anchorPosition.GetPositionX(), session.anchorPosition.GetPositionY(), session.anchorPosition.GetPositionZ(), session.anchorPosition.GetOrientation());
-                }
-            }
         }
 
         //send replay data to spectator
         while (!match.packets.empty() && match.packets.front().timestamp <= bg->GetStartTime())
         {
+            if (bg->GetPlayers().empty())
+                break;
+
             WorldPacket* myPacket = &match.packets.front().packet;
+            Player* replayer = bg->GetPlayers().begin()->second;
             replayer->GetSession()->SendPacket(myPacket);
             match.packets.pop_front();
         }
@@ -835,12 +291,23 @@ public:
             bgPlayersGuids[bg->GetInstanceID()] = playerguids;
         }
 
+        std::string playerGuid = std::to_string(player->GetGUID().GetRawValue());
         TeamId bgTeamId = player->GetBgTeamId();
 
         if (bgTeamId == TEAM_ALLIANCE)
-            AppendGuidCsv(bgPlayersGuids[bg->GetInstanceID()].alliancePlayerGuids, player->GetGUID().GetRawValue());
+        {
+            if (!bgPlayersGuids[bg->GetInstanceID()].alliancePlayerGuids.empty())
+                bgPlayersGuids[bg->GetInstanceID()].alliancePlayerGuids += ", ";
+
+            bgPlayersGuids[bg->GetInstanceID()].alliancePlayerGuids += playerGuid;
+        }
         else
-            AppendGuidCsv(bgPlayersGuids[bg->GetInstanceID()].hordePlayerGuids, player->GetGUID().GetRawValue());
+        {
+            if (!bgPlayersGuids[bg->GetInstanceID()].hordePlayerGuids.empty())
+                bgPlayersGuids[bg->GetInstanceID()].hordePlayerGuids += ", ";
+
+            bgPlayersGuids[bg->GetInstanceID()].hordePlayerGuids += playerGuid;
+        }
     }
 
     void OnBattlegroundEnd(Battleground *bg, TeamId winnerTeamId ) override {
@@ -863,9 +330,6 @@ public:
            saveReplay(bg, winnerTeamId);
            return;
         }
-
-        if (isReplay && !bg->GetPlayers().empty())
-            ReleaseReplayViewerControl(bg->GetPlayers().begin()->second);
 
         bgReplayIds.erase(bg->GetInstanceID());
         bgPlayersGuids.erase(bg->GetInstanceID());
@@ -941,7 +405,17 @@ public:
                 teamLoserMMR = teamMMR;
             }
 
-            ChatHandler(player->GetSession()).SendSysMessage("Replay saved.");
+            // Send replay ID to player after a game end
+            uint32 replayfightid = 0;
+            QueryResult qResult = CharacterDatabase.Query("SELECT MAX(`id`) AS max_id FROM `character_arena_replays`");
+            if (qResult)
+            {
+                do
+                {
+                    replayfightid = qResult->Fetch()[0].Get<uint32>();
+                } while (qResult->NextRow());
+            }
+            ChatHandler(player->GetSession()).PSendSysMessage("Replay saved. Match ID: {}", replayfightid + 1);
         }
 
         const uint8 ARENA_TYPE_3V3_SOLO_QUEUE = sConfigMgr->GetOption<uint8>("ArenaReplay.3v3soloQ.ArenaType", 4);
@@ -967,37 +441,28 @@ public:
         teamLoserMMR=0;
         teamWinnerMMR=0;
 
-        match.winnerPlayerGuidList = ParseGuidCsv(winnerGuids);
-        match.loserPlayerGuidList = ParseGuidCsv(loserGuids);
-        match.winnerActorTracks = (winnerTeamId == TEAM_ALLIANCE) ? match.allianceActorTracks : match.hordeActorTracks;
-        match.loserActorTracks = (winnerTeamId == TEAM_ALLIANCE) ? match.hordeActorTracks : match.allianceActorTracks;
-
-        std::string winnerCameraTrack = (winnerTeamId == TEAM_ALLIANCE) ? SerializeCameraTrack(match.allianceCameraTrack) : SerializeCameraTrack(match.hordeCameraTrack);
-        std::string loserCameraTrack = (winnerTeamId == TEAM_ALLIANCE) ? SerializeCameraTrack(match.hordeCameraTrack) : SerializeCameraTrack(match.allianceCameraTrack);
-        std::string winnerActorTrack = SerializeActorTracks(match.winnerActorTracks);
-        std::string loserActorTrack = SerializeActorTracks(match.loserActorTracks);
-
         CharacterDatabase.Execute("INSERT INTO `character_arena_replays` "
+            //   1             2            3            4          5          6                  7                    8
             "(`arenaTypeId`, `typeId`, `contentSize`, `contents`, `mapId`, `winnerTeamName`, `winnerTeamRating`, `winnerTeamMMR`, "
-            "`loserTeamName`, `loserTeamRating`, `loserTeamMMR`, `winnerPlayerGuids`, `loserPlayerGuids`, `winnerCameraTrack`, `loserCameraTrack`, `winnerActorTrack`, `loserActorTrack`) "
-            "VALUES ({}, {}, {}, \"{}\", {}, '{}', {}, {}, '{}', {}, {}, \"{}\", \"{}\", \"{}\", \"{}\", \"{}\", \"{}\")",
-            uint32(match.arenaTypeId),
-            uint32(match.typeId),
-            buffer.size(),
-            Acore::Encoding::Base32::Encode(buffer.contentsAsVector()),
-            bg->GetMapId(),
-            teamWinnerName,
-            teamWinnerRating,
-            teamWinnerMMR,
-            teamLoserName,
-            teamLoserRating,
-            teamLoserMMR,
-            winnerGuids,
-            loserGuids,
-            winnerCameraTrack,
-            loserCameraTrack,
-            winnerActorTrack,
-            loserActorTrack
+            //    9                10                 11                 12                 13
+            "`loserTeamName`, `loserTeamRating`, `loserTeamMMR`, `winnerPlayerGuids`, `loserPlayerGuids`) "
+
+            "VALUES ({}, {}, {}, \"{}\", {}, '{}', {}, {}, '{}', {}, {}, \"{}\", \"{}\")",
+            //       1   2    3     4    5    6    7   8    9    10  11    12      13
+
+            uint32(match.arenaTypeId), // 1
+            uint32(match.typeId),      // 2
+            buffer.size(),             // 3
+            Acore::Encoding::Base32::Encode(buffer.contentsAsVector()), // 4
+            bg->GetMapId(),    // 5
+            teamWinnerName,    // 6
+            teamWinnerRating,  // 7
+            teamWinnerMMR,     // 8
+            teamLoserName,     // 9
+            teamLoserRating,   // 10
+            teamLoserMMR,      // 11
+            winnerGuids,       // 12
+            loserGuids         // 13
         );
 
         records.erase(it);
@@ -1017,8 +482,16 @@ private:
 
     std::string GetTeamName(std::string listPlayerGuids) {
         std::string teamName;
-        for (uint64 _guid : ParseGuidCsv(listPlayerGuids))
+        std::stringstream ssPlayerGuids(listPlayerGuids);
+
+        std::vector<std::string> playerGuids;
+        std::string playerGuid;
+        while (std::getline(ssPlayerGuids, playerGuid, ','))
+            playerGuids.push_back(playerGuid);
+
+        for (const std::string& guid : playerGuids)
         {
+            uint64 _guid = std::stoi(guid);
             CharacterCacheEntry const* playerData = sCharacterCache->GetCharacterCacheByGuid(ObjectGuid(_guid));
             if (playerData)
                 teamName += playerData->Name + " ";
@@ -1224,39 +697,27 @@ public:
 
                 std::string playerGuidStr = std::to_string(playerData->Guid.GetRawValue());
 
-                QueryResult result = CharacterDatabase.Query(
-                    "SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids "
-                    "FROM character_arena_replays "
-                    "WHERE FIND_IN_SET('{}', REPLACE(winnerPlayerGuids, ' ', '')) OR FIND_IN_SET('{}', REPLACE(loserPlayerGuids, ' ', '')) "
-                    "ORDER BY id DESC LIMIT 30",
-                    playerGuidStr, playerGuidStr);
-                if (!result)
+                QueryResult result = CharacterDatabase.Query("SELECT id FROM character_arena_replays WHERE winnerPlayerGuids LIKE '%{}%' OR loserPlayerGuids LIKE '%{}%'", playerGuidStr, playerGuidStr);
+                if (result)
+                {
+                    ChatHandler(player->GetSession()).PSendSysMessage("Replays found for player: {}", std::string(code));
+                    do
+                    {
+                        Field* fields = result->Fetch();
+                        uint32 replayId = fields[0].Get<uint32>();
+                        ChatHandler(player->GetSession()).PSendSysMessage("Replay ID: {}", replayId);
+                        //AddGossipItemFor(player,) // to do: add gossips with the replays
+                    } while (result->NextRow());
+
+                    CloseGossipMenuFor(player);
+                    return true;
+                }
+                else
                 {
                     ChatHandler(player->GetSession()).PSendSysMessage("No replays found for player: {}", std::string(code));
                     CloseGossipMenuFor(player);
                     return false;
                 }
-
-                std::vector<ReplayInfo> infos;
-                do
-                {
-                    Field* fields = result->Fetch();
-                    if (!fields)
-                        break;
-
-                    ReplayInfo info;
-                    info.matchId = fields[0].Get<uint32>();
-                    info.winnerTeamName = fields[1].Get<std::string>();
-                    info.winnerTeamRating = fields[2].Get<uint32>();
-                    info.winnerPlayerGuids = fields[3].Get<std::string>();
-                    info.loserTeamName = fields[4].Get<std::string>();
-                    info.loserTeamRating = fields[5].Get<uint32>();
-                    info.loserPlayerGuids = fields[6].Get<std::string>();
-                    infos.push_back(std::move(info));
-                } while (result->NextRow());
-
-                ShowReplays(player, nullptr, infos);
-                return true;
             }
             case MY_FAVORITE_MATCHES:
             {
@@ -1339,8 +800,17 @@ private:
 
     std::string GetPlayersIconTexts(std::string playerGuids) {
         std::string iconsTextTeam;
-        for (uint64 _guid : ParseGuidCsv(playerGuids))
+        std::vector<std::string> playerGuidsTeam1;
+
+        std::stringstream ssPlayerGuids(playerGuids);
+        std::string item;
+
+        while (std::getline(ssPlayerGuids, item, ','))
+            playerGuidsTeam1.push_back(item);
+
+        for (const std::string& guid : playerGuidsTeam1)
         {
+            uint64 _guid = std::stoi(guid);
             CharacterCacheEntry const* playerData = sCharacterCache->GetCharacterCacheByGuid(ObjectGuid(_guid));
             if (playerData)
             {
@@ -1536,36 +1006,27 @@ private:
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Favorite a Match ID", REPLAY_GOSSIP_SENDER_CODE, MY_FAVORITE_MATCHES, "", 0, true);
 
         std::string sortOrder = (firstPage) ? "ASC" : "DESC";
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT r.id, r.winnerTeamName, r.winnerTeamRating, r.winnerPlayerGuids, r.loserTeamName, r.loserTeamRating, r.loserPlayerGuids "
-            "FROM character_saved_replays s "
-            "JOIN character_arena_replays r ON r.id = s.replay_id "
-            "WHERE s.character_id = {} ORDER BY s.id {} LIMIT 29",
-            player->GetGUID().GetCounter(), sortOrder);
+        QueryResult result = CharacterDatabase.Query("SELECT replay_id FROM character_saved_replays WHERE character_id = " + std::to_string(player->GetGUID().GetCounter()) + " ORDER BY id " + sortOrder + " LIMIT 29");
         if (!result)
             AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No saved replays found.", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         else
         {
-            std::vector<ReplayInfo> infos;
             do
             {
                 Field* fields = result->Fetch();
                 if (!fields)
                     break;
 
-                ReplayInfo info;
-                info.matchId = fields[0].Get<uint32>();
-                info.winnerTeamName = fields[1].Get<std::string>();
-                info.winnerTeamRating = fields[2].Get<uint32>();
-                info.winnerPlayerGuids = fields[3].Get<std::string>();
-                info.loserTeamName = fields[4].Get<std::string>();
-                info.loserTeamRating = fields[5].Get<uint32>();
-                info.loserPlayerGuids = fields[6].Get<std::string>();
-                infos.push_back(std::move(info));
+                uint32 matchId = fields[0].Get<uint32>();
+                const uint32 actionOffset = GOSSIP_ACTION_INFO_DEF + 30;
+                AddGossipItemFor(player, GOSSIP_ICON_BATTLE, "Replay match " + std::to_string(matchId), REPLAY_GOSSIP_SENDER_SELECT, actionOffset + matchId);
+
             } while (result->NextRow());
 
-            ShowReplays(player, creature, infos);
-            return;
+            if (firstPage) // to do
+            {
+                //AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Next Page", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO_DEF + 1);
+            }
         }
         AddGossipItemFor(player, GOSSIP_ICON_TAXI, "Back", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature ? creature->GetGUID() : player->GetGUID());
@@ -1612,26 +1073,7 @@ private:
             return false;
         }
 
-        auto loadedIt = loadedReplays.find(player->GetGUID().GetCounter());
-        if (loadedIt == loadedReplays.end())
-        {
-            handler.PSendSysMessage("Replay data could not be loaded.");
-            return false;
-        }
-
-        MatchRecord const& record = loadedIt->second;
-        bool viewerWasParticipant = VectorContainsGuid(record.winnerPlayerGuidList, player->GetGUID().GetRawValue()) ||
-                                    VectorContainsGuid(record.loserPlayerGuidList, player->GetGUID().GetRawValue());
-
-        bool actorSpectate = sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.Enable", true) && (!record.winnerActorTracks.empty() || !record.loserActorTracks.empty());
-        bool useRecordedCamera = !actorSpectate && sConfigMgr->GetOption<bool>("ArenaReplay.CameraPOV.Enable", true) && (!record.winnerCameraTrack.empty() || !record.loserCameraTrack.empty());
-
-        if (viewerWasParticipant && sConfigMgr->GetOption<bool>("ArenaReplay.BlockWatchingOwnReplay", true) && !actorSpectate && !useRecordedCamera)
-        {
-            loadedReplays.erase(loadedIt);
-            handler.PSendSysMessage("Watching your own recorded match is blocked right now to avoid bad camera/entity desync.");
-            return false;
-        }
+        MatchRecord record = loadedReplays[player->GetGUID().GetCounter()];
 
         // Use the spectator's real level bracket, not max level.
         // Replays are spectator-only, but the battleground instance still needs a valid bracket/template.
@@ -1662,47 +1104,14 @@ private:
         sBattlegroundMgr->SendToBattleground(player, bg->GetInstanceID(), bgTypeId);
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, queueSlot, STATUS_IN_PROGRESS, 0, bg->GetStartTime(), bg->GetArenaType(), teamId);
         player->GetSession()->SendPacket(&data);
-        LockReplayViewerControl(player, replayId);
-        ActiveReplaySession& replaySession = activeReplaySessions[player->GetGUID().GetCounter()];
-        replaySession.viewerWasParticipant = viewerWasParticipant;
-        replaySession.useRecordedCamera = useRecordedCamera;
-        replaySession.actorSpectateEnabled = actorSpectate;
-        replaySession.cameraUseWinnerTrack = sConfigMgr->GetOption<bool>("ArenaReplay.CameraPOV.StartOnWinnerTrack", true);
-        replaySession.actorUseWinnerTeam = sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnWinnerTeam", true);
-        replaySession.nextCameraSwitchMs = 0;
-        replaySession.nextActorSwitchMs = 0;
-        replaySession.currentActorIndex = 0;
-
-        if (actorSpectate && viewerWasParticipant && sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant", true))
-        {
-            std::vector<ReplayActorTrack> const& initialTracks = replaySession.actorUseWinnerTeam ? record.winnerActorTracks : record.loserActorTracks;
-            for (size_t i = 0; i < initialTracks.size(); ++i)
-            {
-                if (initialTracks[i].playerGuid == player->GetGUID().GetRawValue())
-                {
-                    replaySession.currentActorIndex = uint32(i);
-                    replaySession.currentActorGuid = initialTracks[i].playerGuid;
-                    break;
-                }
-            }
-        }
-
         handler.PSendSysMessage("Replay ID {} begins.", replayId);
-
-        if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
-            handler.PSendSysMessage("Spectator-only mode active: movement is locked during replay playback.");
-
-        if (actorSpectate)
-            handler.SendSysMessage("Replay Actor spectate active: camera follows recorded combatants and auto-cycles targets.");
-        else if (useRecordedCamera)
-            handler.SendSysMessage("Recorded POV camera active.");
 
         return true;
     }
 
     bool loadReplayDataForPlayer(Player* p, uint32 matchId)
     {
-        QueryResult result = CharacterDatabase.Query("SELECT id, arenaTypeId, typeId, contentSize, contents, mapId, timesWatched, winnerPlayerGuids, loserPlayerGuids, winnerCameraTrack, loserCameraTrack, winnerActorTrack, loserActorTrack FROM character_arena_replays WHERE id = {}", matchId);
+        QueryResult result = CharacterDatabase.Query("SELECT id, arenaTypeId, typeId, contentSize, contents, mapId, timesWatched FROM character_arena_replays WHERE id = {}", matchId);
         if (!result)
         {
             ChatHandler(p->GetSession()).PSendSysMessage("Replay data not found.");
@@ -1718,7 +1127,10 @@ private:
             return false;
         }
 
-        CharacterDatabase.Execute("UPDATE character_arena_replays SET timesWatched = timesWatched + 1 WHERE id = {}", matchId);
+        // Update 'timesWatched' of a Replay +1 everytime someone watches it
+        uint32 timesWatched = fields[6].Get<uint32>();
+        timesWatched++;
+        CharacterDatabase.Execute("UPDATE character_arena_replays SET timesWatched = {} WHERE id = {}", timesWatched, matchId);
 
         MatchRecord record;
         deserializeMatchData(record, fields);
@@ -1731,59 +1143,32 @@ private:
     {
         record.arenaTypeId = uint8(fields[1].Get<uint32>());
         record.typeId = BattlegroundTypeId(fields[2].Get<uint32>());
+        std::vector<uint8> data = *Acore::Encoding::Base32::Decode(fields[4].Get<std::string>());
         record.mapId = uint32(fields[5].Get<uint32>());
-        record.winnerPlayerGuidList = ParseGuidCsv(fields[7].Get<std::string>());
-        record.loserPlayerGuidList = ParseGuidCsv(fields[8].Get<std::string>());
-        record.winnerCameraTrack = DeserializeCameraTrack(fields[9].Get<std::string>());
-        record.loserCameraTrack = DeserializeCameraTrack(fields[10].Get<std::string>());
-        record.winnerActorTracks = DeserializeActorTracks(fields[11].Get<std::string>());
-        record.loserActorTracks = DeserializeActorTracks(fields[12].Get<std::string>());
-
-        auto decoded = Acore::Encoding::Base32::Decode(fields[4].Get<std::string>());
-        if (!decoded || decoded->empty())
-            return;
-
         ByteBuffer buffer;
-        buffer.append(decoded->data(), decoded->size());
+        buffer.append(&data[0], data.size());
 
         /** deserialize replay binary data **/
-        while (buffer.rpos() + 10 <= buffer.size())
+        uint32 packetSize;
+        uint32 packetTimestamp;
+        uint16 opcode;
+        while (buffer.rpos() <= buffer.size() - 1)
         {
-            uint32 packetSize = 0;
-            uint32 packetTimestamp = 0;
-            uint16 opcode = 0;
             buffer >> packetSize;
             buffer >> packetTimestamp;
             buffer >> opcode;
-
-            if (packetSize > (buffer.size() - buffer.rpos()))
-                break;
 
             WorldPacket packet(opcode, packetSize);
 
             if (packetSize > 0)
             {
                 std::vector<uint8> tmp(packetSize, 0);
-                buffer.read(tmp.data(), packetSize);
-                packet.append(tmp.data(), packetSize);
+                buffer.read(&tmp[0], packetSize);
+                packet.append(&tmp[0], packetSize);
             }
 
             record.packets.push_back({ packetTimestamp, packet });
         }
-    }
-};
-
-class ArenaReplayPlayerScript : public PlayerScript
-{
-public:
-    ArenaReplayPlayerScript() : PlayerScript("ArenaReplayPlayerScript", {
-        PLAYERHOOK_ON_LOGOUT
-    }) {}
-
-    void OnLogout(Player* player) override
-    {
-        ReleaseReplayViewerControl(player);
-        loadedReplays.erase(player->GetGUID().GetCounter());
     }
 };
 
@@ -1878,7 +1263,6 @@ void AddArenaReplayScripts()
     new ArenaReplayServerScript();
     new ArenaReplayBGScript();
     new ArenaReplayArenaScript();
-    new ArenaReplayPlayerScript();
     new ReplayGossip();
     new PlayerGossip_ArenaReplayService();
 }
