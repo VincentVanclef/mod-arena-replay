@@ -174,11 +174,6 @@ namespace
 
         return false;
     }
-	
-	namespace
-	{
-		static void ReleaseReplayViewerControl(Player* player);
-	}
 
     static ObjectGuid GetOrAssignRecorderGuid(Battleground* bg, Player* player)
     {
@@ -645,6 +640,22 @@ namespace
             session.anchorPosition.GetPositionZ(),
             session.anchorPosition.GetOrientation());
     }
+	
+	static void ReleaseReplayViewerControl(Player* player)
+    {
+        if (!player)
+            return;
+
+        auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
+        if (it != activeReplaySessions.end())
+        {
+            if (it->second.movementLocked)
+                player->SetClientControl(player, true);
+            player->SetVisible(true);
+        }
+
+        activeReplaySessions.erase(player->GetGUID().GetCounter());
+    }
 
     static void ExitReplayAndReturnToAnchor(Player* player, Battleground* bg)
     {
@@ -696,22 +707,6 @@ namespace
         replayer->NearTeleportTo(frame->x, frame->y, frame->z + eyeLift, frame->o);
         session.actorSpectateActive = true;
         return true;
-    }
-
-    static void ReleaseReplayViewerControl(Player* player)
-    {
-        if (!player)
-            return;
-
-        auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
-        if (it != activeReplaySessions.end())
-        {
-            if (it->second.movementLocked)
-                player->SetClientControl(player, true);
-            player->SetVisible(true);
-        }
-
-        activeReplaySessions.erase(player->GetGUID().GetCounter());
     }
 
     static void LockReplayViewerControl(Player* player, uint32 replayId)
