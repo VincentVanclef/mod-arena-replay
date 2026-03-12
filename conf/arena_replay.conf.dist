@@ -70,8 +70,8 @@
 #
 #    ArenaReplay.ActorSpectate.AutoCycleMs
 #        Description: How often spectator view cycles to a different recorded actor.
-#                     0 disables auto cycling and leaves actor changes to future UI/menu controls.
-#        Default:     0
+#                     0 disables auto cycling.
+#        Default:     7000
 #
 #    ArenaReplay.ActorSpectate.FollowDistance
 #        Description: Distance behind the recorded actor for the spectator camera.

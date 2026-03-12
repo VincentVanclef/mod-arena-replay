@@ -16,6 +16,7 @@
 #include "PlayerGossipMgr.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
+#include "ChatCommand.h"
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -139,8 +140,12 @@ struct ActiveReplaySession
     bool actorSpectateActive = false;
     bool actorSpectateOnWinnerTeam = true;
     uint32 actorTrackIndex = 0;
-    uint32 nextActorCycleMs = 0;
     uint32 nextActorTeleportMs = 0;
+    bool hudStarted = false;
+    uint64 lastHudActorGuid = 0;
+    uint32 lastHudActorFlatIndex = 0;
+    uint32 lastHudActorCount = 0;
+    uint32 nextHudWatcherSyncMs = 0;
 };
 struct LiveActorRecorderState
 {
@@ -418,13 +423,125 @@ namespace
         liveActorRecorders.erase(it);
     }
 
-    static void ResetActorReplayView(Player* replayer, ActiveReplaySession& session)
+    static char const* GetReplayHudPrefix()
     {
-        if (!replayer)
+        return "[RTG_REPLAY] ";
+    }
+
+    static std::string GetClassToken(uint8 classId)
+    {
+        switch (classId)
+        {
+            case CLASS_WARRIOR: return "WARRIOR";
+            case CLASS_PALADIN: return "PALADIN";
+            case CLASS_HUNTER: return "HUNTER";
+            case CLASS_ROGUE: return "ROGUE";
+            case CLASS_PRIEST: return "PRIEST";
+            case CLASS_DEATH_KNIGHT: return "DEATHKNIGHT";
+            case CLASS_SHAMAN: return "SHAMAN";
+            case CLASS_MAGE: return "MAGE";
+            case CLASS_WARLOCK: return "WARLOCK";
+            case CLASS_DRUID: return "DRUID";
+            default: return "UNKNOWN";
+        }
+    }
+
+    static std::string GetClassIconPath(uint8 classId)
+    {
+        switch (classId)
+        {
+            case CLASS_WARRIOR: return "Interface\\Icons\\Ability_Warrior_DefensiveStance";
+            case CLASS_PALADIN: return "Interface\\Icons\\Spell_Holy_HolyBolt";
+            case CLASS_HUNTER: return "Interface\\Icons\\INV_Weapon_Bow_07";
+            case CLASS_ROGUE: return "Interface\\Icons\\Ability_BackStab";
+            case CLASS_PRIEST: return "Interface\\Icons\\Spell_Holy_PowerWordShield";
+            case CLASS_DEATH_KNIGHT: return "Interface\\Icons\\Spell_Deathknight_ClassIcon";
+            case CLASS_SHAMAN: return "Interface\\Icons\\Spell_Nature_BloodLust";
+            case CLASS_MAGE: return "Interface\\Icons\\Spell_Frost_FrostBolt02";
+            case CLASS_WARLOCK: return "Interface\\Icons\\Spell_Shadow_DeathCoil";
+            case CLASS_DRUID: return "Interface\\Icons\\Ability_Druid_CatForm";
+            default: return "Interface\\Icons\\INV_Misc_QuestionMark";
+        }
+    }
+
+    static void SendReplayHudMessage(Player* player, std::string const& body)
+    {
+        if (!player || !player->GetSession())
             return;
-        session.actorSpectateActive = false;
-        session.nextActorCycleMs = 0;
+
+        std::string text = std::string(GetReplayHudPrefix()) + body;
+        player->GetSession()->SendNotification("%s", text.c_str());
+    }
+
+    static uint32 GetReplayActorTotalCount(MatchRecord const& match)
+    {
+        return uint32(match.winnerActorTracks.size() + match.loserActorTracks.size());
+    }
+
+    static bool NormalizeReplayActorSelection(MatchRecord const& match, ActiveReplaySession& session)
+    {
+        auto const* current = SelectTracks(match, session.actorSpectateOnWinnerTeam);
+        auto const* other = SelectTracks(match, !session.actorSpectateOnWinnerTeam);
+
+        if (current->empty() && other->empty())
+            return false;
+
+        if (current->empty() && !other->empty())
+        {
+            session.actorSpectateOnWinnerTeam = !session.actorSpectateOnWinnerTeam;
+            current = other;
+        }
+
+        if (current->empty())
+            return false;
+
+        if (session.actorTrackIndex >= current->size())
+            session.actorTrackIndex = 0;
+
+        return true;
+    }
+
+    static ActorTrack const* GetSelectedReplayActorTrack(MatchRecord const& match, ActiveReplaySession& session, uint32* flatIndex = nullptr)
+    {
+        if (!NormalizeReplayActorSelection(match, session))
+            return nullptr;
+
+        auto const* tracks = SelectTracks(match, session.actorSpectateOnWinnerTeam);
+        if (!tracks || tracks->empty())
+            return nullptr;
+
+        if (flatIndex)
+            *flatIndex = session.actorSpectateOnWinnerTeam ? session.actorTrackIndex + 1 : uint32(match.winnerActorTracks.size()) + session.actorTrackIndex + 1;
+
+        return &(*tracks)[session.actorTrackIndex];
+    }
+
+    static bool StepReplayActorSelection(MatchRecord const& match, ActiveReplaySession& session, int32 delta)
+    {
+        uint32 total = GetReplayActorTotalCount(match);
+        if (total == 0)
+            return false;
+
+        uint32 flatIndex = 1;
+        GetSelectedReplayActorTrack(match, session, &flatIndex);
+        int32 idx = int32(flatIndex) - 1 + delta;
+        while (idx < 0)
+            idx += int32(total);
+        idx %= int32(total);
+
+        if (uint32(idx) < match.winnerActorTracks.size())
+        {
+            session.actorSpectateOnWinnerTeam = true;
+            session.actorTrackIndex = uint32(idx);
+        }
+        else
+        {
+            session.actorSpectateOnWinnerTeam = false;
+            session.actorTrackIndex = uint32(idx) - uint32(match.winnerActorTracks.size());
+        }
+
         session.nextActorTeleportMs = 0;
+        return true;
     }
 
     static ActorFrame const* GetActorFrameAtOrBeforeTime(ActorTrack const& track, uint32 nowMs)
@@ -443,66 +560,135 @@ namespace
         return frame;
     }
 
+    static void SendReplayHudPov(Player* replayer, MatchRecord const& match, ActiveReplaySession& session, bool force)
+    {
+        uint32 flatIndex = 1;
+        ActorTrack const* track = GetSelectedReplayActorTrack(match, session, &flatIndex);
+        uint32 total = GetReplayActorTotalCount(match);
+        if (!track)
+            return;
+
+        if (!force && session.hudStarted && session.lastHudActorGuid == track->guid && session.lastHudActorFlatIndex == flatIndex && session.lastHudActorCount == total)
+            return;
+
+        std::ostringstream body;
+        if (!session.hudStarted)
+            body << "START|";
+        else
+            body << "POV|";
+
+        body << track->guid << '|' << track->name << '|' << GetClassToken(track->playerClass) << '|' << flatIndex << '|' << total;
+        SendReplayHudMessage(replayer, body.str());
+        session.hudStarted = true;
+        session.lastHudActorGuid = track->guid;
+        session.lastHudActorFlatIndex = flatIndex;
+        session.lastHudActorCount = total;
+    }
+
+    static void SendReplayHudWatchers(Battleground* bg, Player* replayer, MatchRecord const& match, ActiveReplaySession& session, bool force)
+    {
+        if (!bg || !replayer)
+            return;
+
+        uint32 nowMs = bg->GetStartTime();
+        if (!force && session.nextHudWatcherSyncMs > nowMs)
+            return;
+        session.nextHudWatcherSyncMs = nowMs + 1000;
+
+        std::ostringstream payload;
+        std::vector<std::string> entries;
+        uint32 count = 0;
+        for (auto const& pair : bg->GetPlayers())
+        {
+            Player* viewer = pair.second;
+            if (!viewer)
+                continue;
+            ++count;
+            std::ostringstream e;
+            e << viewer->GetGUID().GetCounter() << ',' << viewer->GetName() << ',' << GetClassToken(viewer->getClass()) << ',' << GetClassIconPath(viewer->getClass());
+            entries.push_back(e.str());
+        }
+
+        payload << "WATCHERS|" << count << '|';
+        for (size_t i = 0; i < entries.size(); ++i)
+        {
+            if (i)
+                payload << ';';
+            payload << entries[i];
+        }
+        SendReplayHudMessage(replayer, payload.str());
+    }
+
+    static void SendReplayHudEnd(Player* player)
+    {
+        SendReplayHudMessage(player, "END");
+    }
+
+    static void ReturnReplayViewerToAnchor(Player* player)
+    {
+        if (!player)
+            return;
+
+        auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
+        if (it == activeReplaySessions.end())
+            return;
+
+        ActiveReplaySession const session = it->second;
+        player->TeleportTo(session.anchorMapId,
+            session.anchorPosition.GetPositionX(),
+            session.anchorPosition.GetPositionY(),
+            session.anchorPosition.GetPositionZ(),
+            session.anchorPosition.GetOrientation());
+    }
+
+    static void ExitReplayAndReturnToAnchor(Player* player, Battleground* bg)
+    {
+        if (!player)
+            return;
+
+        SendReplayHudEnd(player);
+        ReleaseReplayViewerControl(player);
+
+        if (bg)
+            player->LeaveBattleground(bg);
+
+        ReturnReplayViewerToAnchor(player);
+    }
+
+    static void ResetActorReplayView(Player* replayer, ActiveReplaySession& session)
+    {
+        if (!replayer)
+            return;
+        session.actorSpectateActive = false;
+        session.nextActorTeleportMs = 0;
+    }
+
     static bool ApplyActorReplayView(Player* replayer, MatchRecord& match, ActiveReplaySession& session, uint32 nowMs)
     {
         if (!replayer || !sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.Enable", true))
             return false;
 
-        auto const* preferred = SelectTracks(match, session.actorSpectateOnWinnerTeam);
-        auto const* alternate = SelectTracks(match, !session.actorSpectateOnWinnerTeam);
-        if (preferred->empty() && alternate->empty())
+        uint32 flatIndex = 1;
+        ActorTrack const* track = GetSelectedReplayActorTrack(match, session, &flatIndex);
+        if (!track)
         {
             ResetActorReplayView(replayer, session);
             return false;
         }
 
-        // Manual team/actor switching is intended to be driven by UI controls later.
-        // During passive playback, keep the selected side stable and only fall back once
-        // if the requested side has no recorded tracks.
-        if (preferred->empty() && !alternate->empty())
-        {
-            session.actorSpectateOnWinnerTeam = !session.actorSpectateOnWinnerTeam;
-            preferred = alternate;
-        }
-
-        if (preferred->empty())
-            return false;
-
-        if (session.actorTrackIndex >= preferred->size())
-            session.actorTrackIndex = 0;
-
-        uint32 cycleMs = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.AutoCycleMs", 0);
-        if (cycleMs > 0)
-        {
-            if (session.nextActorCycleMs == 0)
-                session.nextActorCycleMs = nowMs + cycleMs;
-
-            if (session.nextActorCycleMs <= nowMs)
-            {
-                session.nextActorCycleMs = nowMs + cycleMs;
-                session.actorTrackIndex = (session.actorTrackIndex + 1) % preferred->size();
-            }
-        }
-        else
-        {
-            session.nextActorCycleMs = 0;
-        }
-
-        ActorTrack const& track = (*preferred)[session.actorTrackIndex];
-        ActorFrame const* frame = GetActorFrameAtOrBeforeTime(track, nowMs);
-        if (!frame)
+        if (track->frames.empty())
             return false;
 
         if (session.nextActorTeleportMs > nowMs)
             return true;
         session.nextActorTeleportMs = nowMs + sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.TeleportMs", 100);
 
-        float followDistance = sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowDistance", 2.5f);
-        float followHeight = sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowHeight", 1.6f);
-        float backX = frame->x - std::cos(frame->o) * followDistance;
-        float backY = frame->y - std::sin(frame->o) * followDistance;
-        float backZ = frame->z + followHeight;
-        replayer->NearTeleportTo(backX, backY, backZ, frame->o);
+        ActorFrame const* frame = GetActorFrameAtOrBeforeTime(*track, nowMs);
+        if (!frame)
+            return false;
+
+        float eyeLift = 1.6f;
+        replayer->NearTeleportTo(frame->x, frame->y, frame->z + eyeLift, frame->o);
         session.actorSpectateActive = true;
         return true;
     }
@@ -513,8 +699,12 @@ namespace
             return;
 
         auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
-        if (it != activeReplaySessions.end() && it->second.movementLocked)
-            player->SetClientControl(player, true);
+        if (it != activeReplaySessions.end())
+        {
+            if (it->second.movementLocked)
+                player->SetClientControl(player, true);
+            player->SetVisible(true);
+        }
 
         activeReplaySessions.erase(player->GetGUID().GetCounter());
     }
@@ -530,12 +720,20 @@ namespace
         session.anchorMapId = player->GetMapId();
         session.anchorPosition.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
         session.nextAnchorEnforceMs = 0;
+        session.nextActorTeleportMs = 0;
+        session.nextHudWatcherSyncMs = 0;
+        session.hudStarted = false;
+        session.lastHudActorGuid = 0;
+        session.lastHudActorFlatIndex = 0;
+        session.lastHudActorCount = 0;
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
         {
             player->SetClientControl(player, false);
             session.movementLocked = true;
         }
+
+        player->SetVisible(false);
     }
 }
 
@@ -655,8 +853,7 @@ public:
             if (!bg->GetPlayers().empty())
             {
                 Player* replayer = bg->GetPlayers().begin()->second;
-                ReleaseReplayViewerControl(replayer);
-                replayer->LeaveBattleground(bg);
+                ExitReplayAndReturnToAnchor(replayer, bg);
             }
 
             loadedReplays.erase(it);
@@ -665,8 +862,7 @@ public:
 
         Player* replayer = bg->GetPlayers().begin()->second;
 
-        // Send replay packets first so the client has the proper object state for this tick
-        // before any replay-view camera reposition is applied.
+        // send replay data to spectator first so actors exist client-side before camera positioning
         while (!match.packets.empty() && match.packets.front().timestamp <= bg->GetStartTime())
         {
             WorldPacket* myPacket = &match.packets.front().packet;
@@ -679,6 +875,8 @@ public:
         {
             ActiveReplaySession& session = sessionIt->second;
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime());
+            SendReplayHudPov(replayer, match, session, false);
+            SendReplayHudWatchers(bg, replayer, match, session, false);
             if (!actorViewApplied && session.nextAnchorEnforceMs <= bg->GetStartTime())
             {
                 session.nextAnchorEnforceMs = bg->GetStartTime() + 500;
@@ -750,7 +948,7 @@ public:
         }
 
         if (isReplay && !bg->GetPlayers().empty())
-            ReleaseReplayViewerControl(bg->GetPlayers().begin()->second);
+            ExitReplayAndReturnToAnchor(bg->GetPlayers().begin()->second, bg);
 
         bgReplayIds.erase(bg->GetInstanceID());
         bgPlayersGuids.erase(bg->GetInstanceID());
@@ -1545,16 +1743,15 @@ private:
         // TEAM_NEUTRAL can leave the replay instance without a valid team start location on some maps,
         // which can cascade into bad teleports/homebinds. Keep the player on their real faction team
         // while still marking them as spectator via SetPendingSpectatorForBG().
+        LockReplayViewerControl(player, replayId);
         player->SetBattlegroundId(bg->GetInstanceID(), bgTypeId, queueSlot, true, false, teamId);
         sBattlegroundMgr->SendToBattleground(player, bg->GetInstanceID(), bgTypeId);
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, queueSlot, STATUS_IN_PROGRESS, 0, bg->GetStartTime(), bg->GetArenaType(), teamId);
         player->GetSession()->SendPacket(&data);
-        LockReplayViewerControl(player, replayId);
         ActiveReplaySession& replaySession = activeReplaySessions[player->GetGUID().GetCounter()];
         replaySession.viewerWasParticipant = viewerWasParticipant;
         replaySession.actorSpectateOnWinnerTeam = sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnWinnerTeam", true);
         replaySession.actorTrackIndex = 0;
-        replaySession.nextActorCycleMs = 0;
         replaySession.nextActorTeleportMs = 0;
 
         if (viewerWasParticipant && sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant", true))
@@ -1766,6 +1963,76 @@ namespace RTG::Services::ArenaReplay
     }
 }
 
+
+class ArenaReplayCommandScript : public CommandScript
+{
+public:
+    ArenaReplayCommandScript() : CommandScript("ArenaReplayCommandScript") { }
+
+    ChatCommandTable GetCommands() const override
+    {
+        static ChatCommandTable replaySubTable =
+        {
+            { "prev", HandleReplayPrevCommand, SEC_PLAYER, Console::No },
+            { "next", HandleReplayNextCommand, SEC_PLAYER, Console::No },
+            { "open", HandleReplayOpenCommand, SEC_PLAYER, Console::No },
+        };
+
+        static ChatCommandTable commandTable =
+        {
+            { "rtgreplay", replaySubTable }
+        };
+
+        return commandTable;
+    }
+
+    static bool HandleReplayPrevCommand(ChatHandler* handler)
+    {
+        return HandleReplayStep(handler, -1);
+    }
+
+    static bool HandleReplayNextCommand(ChatHandler* handler)
+    {
+        return HandleReplayStep(handler, 1);
+    }
+
+    static bool HandleReplayOpenCommand(ChatHandler* handler)
+    {
+        if (!handler)
+            return false;
+        Player* player = handler->GetPlayer();
+        return RTG::Services::ArenaReplay::Open(player);
+    }
+
+    static bool HandleReplayStep(ChatHandler* handler, int32 delta)
+    {
+        if (!handler)
+            return false;
+
+        Player* player = handler->GetPlayer();
+        if (!player)
+            return false;
+
+        auto sessionIt = activeReplaySessions.find(player->GetGUID().GetCounter());
+        auto replayIt = loadedReplays.find(player->GetGUID().GetCounter());
+        if (sessionIt == activeReplaySessions.end() || replayIt == loadedReplays.end())
+        {
+            handler->PSendSysMessage("You are not currently watching a replay.");
+            return false;
+        }
+
+        if (!StepReplayActorSelection(replayIt->second, sessionIt->second, delta))
+        {
+            handler->PSendSysMessage("No replay actors are available.");
+            return false;
+        }
+
+        SendReplayHudPov(player, replayIt->second, sessionIt->second, true);
+        SendReplayHudWatchers(player->GetBattleground(), player, replayIt->second, sessionIt->second, true);
+        return true;
+    }
+};
+
 void AddArenaReplayScripts()
 {
     new ConfigLoaderArenaReplay();
@@ -1775,4 +2042,5 @@ void AddArenaReplayScripts()
     new ArenaReplayPlayerScript();
     new ReplayGossip();
     new PlayerGossip_ArenaReplayService();
+    new ArenaReplayCommandScript();
 }
