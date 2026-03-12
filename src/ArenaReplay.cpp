@@ -12,6 +12,8 @@
 #include "Config.h"
 #include "Opcodes.h"
 #include "Player.h"
+#include "ObjectAccessor.h"
+#include "TemporarySummon.h"
 #include "PlayerGossip.h"
 #include "PlayerGossipMgr.h"
 #include "ScriptedGossip.h"
@@ -112,6 +114,7 @@ struct ActorTrack
     uint8 playerClass = 0;
     uint8 race = 0;
     uint8 gender = 0;
+    uint32 displayId = 0;
     std::string name;
     std::vector<ActorFrame> frames;
 };
@@ -146,6 +149,9 @@ struct ActiveReplaySession
     uint32 lastHudActorFlatIndex = 0;
     uint32 lastHudActorCount = 0;
     uint32 nextHudWatcherSyncMs = 0;
+    bool cloneActorsSpawned = false;
+    uint32 nextCloneUpdateMs = 0;
+    std::unordered_map<uint64, ObjectGuid> cloneActorGuids;
 };
 struct LiveActorRecorderState
 {
@@ -245,6 +251,8 @@ namespace
         return value;
     }
 
+    static ActorFrame const* GetActorFrameAtOrBeforeTime(ActorTrack const& track, uint32 nowMs);
+
     static std::vector<ActorTrack>* SelectTracks(MatchRecord& match, bool winnerSide)
     {
         return winnerSide ? &match.winnerActorTracks : &match.loserActorTracks;
@@ -264,7 +272,7 @@ namespace
             if (i)
                 out << "||";
 
-            out << track.guid << ';' << uint32(track.playerClass) << ';' << uint32(track.race) << ';' << uint32(track.gender) << ';' << track.name << ';';
+            out << track.guid << ';' << uint32(track.playerClass) << ';' << uint32(track.race) << ';' << uint32(track.gender) << ';' << track.displayId << ';' << track.name << ';';
             for (size_t j = 0; j < track.frames.size(); ++j)
             {
                 ActorFrame const& frame = track.frames[j];
@@ -293,7 +301,7 @@ namespace
 
             std::vector<std::string> parts;
             size_t pstart = 0;
-            while (parts.size() < 5)
+            while (parts.size() < 6)
             {
                 size_t pend = entry.find(';', pstart);
                 if (pend == std::string::npos)
@@ -311,12 +319,20 @@ namespace
                 track.playerClass = uint8(std::stoul(parts[1]));
                 track.race = uint8(std::stoul(parts[2]));
                 track.gender = uint8(std::stoul(parts[3]));
+                if (parts.size() >= 6)
+                {
+                    track.displayId = uint32(std::stoul(parts[4]));
+                    track.name = parts[5];
+                }
+                else
+                {
+                    track.name = parts[4];
+                }
             }
             catch (...)
             {
                 continue;
             }
-            track.name = parts[4];
             std::string framesPart = pstart <= entry.size() ? entry.substr(pstart) : std::string();
             std::stringstream fss(framesPart);
             std::string frameToken;
@@ -377,6 +393,7 @@ namespace
                 track.playerClass = actor->getClass();
                 track.race = actor->getRace();
                 track.gender = actor->getGender();
+                track.displayId = actor->GetDisplayId();
                 track.name = actor->GetName();
             }
 
@@ -421,6 +438,111 @@ namespace
         }
 
         liveActorRecorders.erase(it);
+    }
+
+    static uint32 GetReplayCloneEntry()
+    {
+        return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneActors.Entry", 98501);
+    }
+
+    static bool IsReplayCloneActorsEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.CloneActors.Enable", true);
+    }
+
+    static void DespawnReplayCloneActors(Player* player, ActiveReplaySession& session)
+    {
+        if (!player)
+            return;
+
+        for (auto const& kv : session.cloneActorGuids)
+            if (Creature* clone = ObjectAccessor::GetCreature(*player, kv.second))
+                clone->DespawnOrUnsummon();
+
+        session.cloneActorGuids.clear();
+        session.cloneActorsSpawned = false;
+        session.nextCloneUpdateMs = 0;
+    }
+
+    static Creature* GetReplayCloneForTrack(Player* player, ActiveReplaySession& session, uint64 actorGuid)
+    {
+        if (!player)
+            return nullptr;
+
+        auto it = session.cloneActorGuids.find(actorGuid);
+        if (it == session.cloneActorGuids.end())
+            return nullptr;
+
+        return ObjectAccessor::GetCreature(*player, it->second);
+    }
+
+    static void EnsureReplayCloneActors(Player* player, MatchRecord const& match, ActiveReplaySession& session)
+    {
+        if (!player || !IsReplayCloneActorsEnabled())
+            return;
+
+        if (session.cloneActorsSpawned)
+            return;
+
+        auto spawnBucket = [&](std::vector<ActorTrack> const& tracks)
+        {
+            for (ActorTrack const& track : tracks)
+            {
+                if (track.frames.empty())
+                    continue;
+
+                ActorFrame const& first = track.frames.front();
+                TempSummon* summon = player->SummonCreature(GetReplayCloneEntry(), first.x, first.y, first.z, first.o, TEMPSUMMON_MANUAL_DESPAWN, 0);
+                if (!summon)
+                    continue;
+
+                summon->SetWalk(false);
+                summon->SetReactState(REACT_PASSIVE);
+                summon->SetFaction(player->GetFaction());
+                summon->SetLevel(player->GetLevel());
+                if (track.displayId)
+                    summon->SetDisplayId(track.displayId);
+                session.cloneActorGuids[track.guid] = summon->GetGUID();
+            }
+        };
+
+        spawnBucket(match.winnerActorTracks);
+        spawnBucket(match.loserActorTracks);
+        session.cloneActorsSpawned = !session.cloneActorGuids.empty();
+    }
+
+    static void UpdateReplayCloneActors(Player* player, MatchRecord const& match, ActiveReplaySession& session, uint32 nowMs)
+    {
+        if (!player || !IsReplayCloneActorsEnabled())
+            return;
+
+        EnsureReplayCloneActors(player, match, session);
+        if (!session.cloneActorsSpawned)
+            return;
+
+        if (session.nextCloneUpdateMs > nowMs)
+            return;
+
+        session.nextCloneUpdateMs = nowMs + sConfigMgr->GetOption<uint32>("ArenaReplay.CloneActors.UpdateMs", 100);
+
+        auto updateBucket = [&](std::vector<ActorTrack> const& tracks)
+        {
+            for (ActorTrack const& track : tracks)
+            {
+                Creature* clone = GetReplayCloneForTrack(player, session, track.guid);
+                if (!clone)
+                    continue;
+
+                ActorFrame const* frame = GetActorFrameAtOrBeforeTime(track, nowMs);
+                if (!frame)
+                    continue;
+
+                clone->NearTeleportTo(frame->x, frame->y, frame->z, frame->o);
+            }
+        };
+
+        updateBucket(match.winnerActorTracks);
+        updateBucket(match.loserActorTracks);
     }
 
     static char const* GetReplayHudPrefix()
@@ -649,6 +771,7 @@ namespace
         auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
         if (it != activeReplaySessions.end())
         {
+            DespawnReplayCloneActors(player, it->second);
             if (it->second.movementLocked)
                 player->SetClientControl(player, true);
             player->SetVisible(true);
@@ -704,6 +827,21 @@ namespace
             return false;
 
         float eyeLift = 1.6f;
+        if (IsReplayCloneActorsEnabled())
+        {
+            if (Creature* clone = GetReplayCloneForTrack(replayer, session, track->guid))
+            {
+                float dist = sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowDistance", 2.5f);
+                float height = sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.FollowHeight", 1.6f);
+                float x = clone->GetPositionX() - std::cos(clone->GetOrientation()) * dist;
+                float y = clone->GetPositionY() - std::sin(clone->GetOrientation()) * dist;
+                float z = clone->GetPositionZ() + height;
+                replayer->NearTeleportTo(x, y, z, clone->GetOrientation());
+                session.actorSpectateActive = true;
+                return true;
+            }
+        }
+
         replayer->NearTeleportTo(frame->x, frame->y, frame->z + eyeLift, frame->o);
         session.actorSpectateActive = true;
         return true;
@@ -726,6 +864,9 @@ namespace
         session.lastHudActorGuid = 0;
         session.lastHudActorFlatIndex = 0;
         session.lastHudActorCount = 0;
+        session.cloneActorsSpawned = false;
+        session.nextCloneUpdateMs = 0;
+        session.cloneActorGuids.clear();
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
         {
@@ -874,6 +1015,7 @@ public:
         if (sessionIt != activeReplaySessions.end())
         {
             ActiveReplaySession& session = sessionIt->second;
+            UpdateReplayCloneActors(replayer, match, session, bg->GetStartTime());
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime());
             SendReplayHudPov(replayer, match, session, false);
             SendReplayHudWatchers(bg, replayer, match, session, false);
@@ -1721,7 +1863,19 @@ private:
 
         // Use the spectator's real level bracket, not max level.
         // Replays are spectator-only, but the battleground instance still needs a valid bracket/template.
-        Battleground* bg = sBattlegroundMgr->CreateNewBattleground(record.typeId, GetBattlegroundBracketByLevel(record.mapId, player->GetLevel()), record.arenaTypeId, false);
+        PvPDifficultyEntry const* bracket = GetBattlegroundBracketByLevel(record.mapId, player->GetLevel());
+        if (!bracket)
+        {
+            handler.PSendSysMessage("Couldn't find a valid battleground bracket for replay map {} at viewer level {}.", record.mapId, player->GetLevel());
+            handler.SetSentErrorMessage(true);
+            return false;
+        }
+
+        // Preserve a valid return location before we move the viewer into a temporary replay battleground.
+        // Without this, failed transfers/cleanup paths can fall back to map 0 and hard-disconnect the player.
+        player->SetEntryPoint();
+
+        Battleground* bg = sBattlegroundMgr->CreateNewBattleground(record.typeId, bracket, record.arenaTypeId, false);
         if (!bg)
         {
             handler.PSendSysMessage("Couldn't create arena map!");
@@ -1744,6 +1898,8 @@ private:
         // which can cascade into bad teleports/homebinds. Keep the player on their real faction team
         // while still marking them as spectator via SetPendingSpectatorForBG().
         LockReplayViewerControl(player, replayId);
+        // Mirror core arena-teleport flow: make sure we are not still considered queued elsewhere.
+        sLFGMgr->LeaveAllLfgQueues(player->GetGUID(), false);
         player->SetBattlegroundId(bg->GetInstanceID(), bgTypeId, queueSlot, true, false, teamId);
         sBattlegroundMgr->SendToBattleground(player, bg->GetInstanceID(), bgTypeId);
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, queueSlot, STATUS_IN_PROGRESS, 0, bg->GetStartTime(), bg->GetArenaType(), teamId);

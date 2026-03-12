@@ -54,6 +54,23 @@
 #        Default:     1 - Enabled
 #                     0 - Disabled
 #
+#    ArenaReplay.CloneActors.Enable
+#        Description: Spawn prototype replay clone creatures for recorded participants.
+#                     This is the first clone-layer prototype and currently focuses on
+#                     body/display + movement playback, not full packet GUID remap.
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#    ArenaReplay.CloneActors.Entry
+#        Description: creature_template entry used for spawned replay clone actors.
+#                     Requires the module world SQL for entry 98501 or your own template.
+#        Default:     98501
+#
+#    ArenaReplay.CloneActors.UpdateMs
+#        Description: How often replay clone creatures are repositioned.
+#        Default:     100
+#
+#
 #    ArenaReplay.ActorSpectate.Enable
 #        Description: Record actor tracks during live arena matches and use them to drive
 #                     spectator follow-camera playback.
@@ -109,6 +126,9 @@ ArenaReplay.ActorSpectate.FollowDistance = 2.5
 ArenaReplay.ActorSpectate.FollowHeight = 1.6
 ArenaReplay.ActorSpectate.StartOnWinnerTeam = 1
 ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant = 1
+ArenaReplay.CloneActors.Enable = 1
+ArenaReplay.CloneActors.Entry = 98501
+ArenaReplay.CloneActors.UpdateMs = 100
 
 ArenaReplay.1v1.Enable = 0
 ArenaReplay.1v1.ArenaType = 1
