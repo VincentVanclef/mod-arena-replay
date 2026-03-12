@@ -1,26 +1,6 @@
-CREATE TABLE IF NOT EXISTS `character_arena_replays` (
-  `id` INT NOT NULL AUTO_INCREMENT,
-  `arenaTypeId` INT NULL DEFAULT NULL,
-  `typeId` INT NULL DEFAULT NULL,
-  `contentSize` INT NULL DEFAULT NULL,
-  `contents` LONGTEXT NULL,
-  `mapId` INT NULL DEFAULT NULL,
-  `winnerTeamName` VARCHAR(255) NULL DEFAULT NULL,
-  `winnerTeamRating` INT NULL DEFAULT NULL,
-  `winnerTeamMMR` INT NULL DEFAULT NULL,
-  `loserTeamName` VARCHAR(255) NULL DEFAULT NULL,
-  `loserTeamRating` INT NULL DEFAULT NULL,
-  `loserTeamMMR` INT NULL DEFAULT NULL,
-  `winnerPlayerGuids` VARCHAR(255) NULL DEFAULT NULL,
-  `loserPlayerGuids` VARCHAR(255) NULL DEFAULT NULL,
-  `winnerActorTrack` LONGTEXT NULL,
-  `loserActorTrack` LONGTEXT NULL,
-  `timesWatched` INT NOT NULL DEFAULT 0,
-  `timestamp` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE
-) ENGINE=InnoDB CHARACTER SET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC;
+-- Arena Replay schema sync for existing characters DB installs.
+-- Fixes unknown column errors such as winnerActorTrack / loserActorTrack when module code is newer than the table schema.
 
--- Existing installs: keep schema in sync with current module code.
 SET @arenaReplayDb := DATABASE();
 
 SET @stmt := IF(
@@ -93,6 +73,21 @@ SET @stmt := IF(
   ),
   'SELECT 1',
   'ALTER TABLE `character_arena_replays` ADD INDEX `idx_timestamp` (`timestamp`)'
+);
+PREPARE stmt FROM @stmt;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+SET @stmt := IF(
+  EXISTS (
+    SELECT 1
+    FROM INFORMATION_SCHEMA.STATISTICS
+    WHERE TABLE_SCHEMA = @arenaReplayDb
+      AND TABLE_NAME = 'character_saved_replays'
+      AND INDEX_NAME = 'idx_replay_id'
+  ),
+  'SELECT 1',
+  'ALTER TABLE `character_saved_replays` ADD INDEX `idx_replay_id` (`replay_id`)'
 );
 PREPARE stmt FROM @stmt;
 EXECUTE stmt;
