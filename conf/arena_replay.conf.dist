@@ -92,6 +92,13 @@
 #        Default:     1 - Enabled
 #                     0 - Disabled
 #
+#    ArenaReplay.Debug
+#        Description: Enables additional replay watch diagnostics in the worldserver log.
+#                     This is intended for replay entry, battleground creation, and
+#                     spectator handoff troubleshooting.
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
 ArenaReplay.Enable = 1
 ArenaReplay.DeleteReplaysAfterDays = 30
 ArenaReplay.DeleteSavedReplays = 0
@@ -109,6 +116,7 @@ ArenaReplay.ActorSpectate.FollowDistance = 2.5
 ArenaReplay.ActorSpectate.FollowHeight = 1.6
 ArenaReplay.ActorSpectate.StartOnWinnerTeam = 1
 ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant = 1
+ArenaReplay.Debug = 0
 
 ArenaReplay.1v1.Enable = 0
 ArenaReplay.1v1.ArenaType = 1
