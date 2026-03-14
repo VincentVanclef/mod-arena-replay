@@ -170,6 +170,72 @@ ArenaReplay.1v1.ArenaType = 1
 ArenaReplay.3v3soloQ.Enable = 0
 ArenaReplay.3v3soloQ.ArenaType = 4
 
+
+########################################
+# ArenaReplay Library
+########################################
+#
+#    ArenaReplay.Library.BrowseLimit
+#        Description: Maximum number of replay entries shown in replay browser
+#                     lists such as recent matches, recently watched, favorites,
+#                     most watched, and top bracket queries.
+#
+#                     Raising this value exposes more history per menu, but can
+#                     make large gossip pages harder to scan quickly.
+#
+#        Default:     20
+#                     Minimum effective value is 5.
+#
+#        Example:     ArenaReplay.Library.BrowseLimit = 25
+#                     Shows up to 25 replay entries per browser list.
+#
+#    ArenaReplay.Library.RecentMatchesDays
+#        Description: Number of days included when building the "My recent
+#                     matches" replay browser list.
+#
+#                     This gives players an Apex-style personal match history so
+#                     they can jump back into their own recent games without
+#                     needing to remember match IDs or manually save them first.
+#
+#        Default:     30
+#                     Minimum effective value is 1.
+#
+#        Example:     ArenaReplay.Library.RecentMatchesDays = 14
+#                     Only the player's last 14 days of replay-eligible matches
+#                     are shown in the personal recent matches list.
+#
+#    ArenaReplay.Library.RecentlyWatched.Enable
+#        Description: Enables the personal "Recently watched" replay history.
+#
+#                     When enabled, every replay a player opens is tracked in a
+#                     lightweight history table so they can revisit it later
+#                     without retyping IDs or searching again.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Library.RecentlyWatched.Enable = 1
+#                     Players can reopen replays from their watch history.
+#
+#    ArenaReplay.Library.RecentlyWatched.RetentionDays
+#        Description: Number of days to retain entries in the recently watched
+#                     replay history table during automatic cleanup.
+#
+#                     This does not delete the replay itself; it only removes the
+#                     per-player watch-history entry after it becomes old enough.
+#
+#        Default:     90
+#                     0  - Disabled (never auto-delete watch-history rows)
+#                     >0 - Delete recently watched rows older than this many days
+#
+#        Example:     ArenaReplay.Library.RecentlyWatched.RetentionDays = 180
+#                     Keeps recently watched replay history for 180 days.
+#
+ArenaReplay.Library.BrowseLimit = 20
+ArenaReplay.Library.RecentMatchesDays = 30
+ArenaReplay.Library.RecentlyWatched.Enable = 1
+ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
+
 ########################################
 # ArenaReplay Actor Spectate
 ########################################

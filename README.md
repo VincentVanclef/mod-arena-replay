@@ -48,3 +48,35 @@ This branch adds a new **Replay Actor Spectate** layer. It does not yet spawn fu
 
 ### Important limitation
 This is **clone-target spectating scaffolding**, not the final cloned-actor / GUID-remap engine. The camera now follows recorded participant tracks instead of relying only on winner/loser POV anchor tracks, but it still does not spawn fully remapped duplicate units yet.
+
+
+## RTG modernization pass: replay library / Apex-style history
+
+This update pushes the module closer to a persistent replay library instead of a one-off replay launcher.
+
+### Added
+- **My recent matches** browser entry so players can reopen their own recent replay-eligible games without remembering IDs.
+- **Recently watched** browser entry backed by a dedicated characters DB table.
+- Automatic **watch history upsert** every time a replay is opened.
+- `INSERT IGNORE` protection for saved favorites so duplicate saves do not spam errors.
+- Configurable browser list sizing and history retention.
+- Cleanup for orphaned recently watched rows when old replay rows are removed.
+
+### New characters DB file
+- `data/sql/db-characters/replayarena_recently_watched.sql`
+
+### New/updated config keys
+- `ArenaReplay.Library.BrowseLimit`
+- `ArenaReplay.Library.RecentMatchesDays`
+- `ArenaReplay.Library.RecentlyWatched.Enable`
+- `ArenaReplay.Library.RecentlyWatched.RetentionDays`
+
+### Practical result
+Players now get a more modern replay flow:
+- play match
+- replay gets recorded
+- reopen it from **My recent matches**
+- rewatch it later from **Recently watched**
+- optionally keep it forever in **My favorite matches**
+
+That gives you a much better foundation for the “Apex replay” feel where a replay can stay part of a player’s personal library instead of being a temporary curiosity.

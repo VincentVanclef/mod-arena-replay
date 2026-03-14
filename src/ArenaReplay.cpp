@@ -1140,7 +1140,9 @@ enum ReplayGossips
     REPLAY_TOP_5V5_ALLTIME = 11,
     REPLAY_TOP_3V3SOLO_ALLTIME = 12,
     REPLAY_TOP_1V1_ALLTIME = 13,
-    REPLAY_MOST_WATCHED_ALLTIME = 14
+    REPLAY_MOST_WATCHED_ALLTIME = 14,
+    REPLAY_MY_RECENT_MATCHES = 15,
+    REPLAY_RECENTLY_WATCHED = 16
 };
 
 class ReplayGossip : public CreatureScript
@@ -1173,6 +1175,8 @@ public:
 
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay a Match ID", REPLAY_GOSSIP_SENDER_CODE, REPLAY_MATCH_ID, "", 0, true);             // maybe add command .replay 'replayID' aswell
         AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Replay list by player name", REPLAY_GOSSIP_SENDER_CODE, REPLAY_LIST_BY_PLAYERNAME, "", 0, true); // to do: show a list, showing games with type, teamname and teamrating
+        AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "My recent matches", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_MY_RECENT_MATCHES);
+        AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "Recently watched", REPLAY_GOSSIP_SENDER_SELECT, REPLAY_RECENTLY_WATCHED);
         AddGossipItemFor(player, GOSSIP_ICON_TRAINER, "My favorite matches", REPLAY_GOSSIP_SENDER_SELECT, MY_FAVORITE_MATCHES);                   // To do: somehow show teamName/TeamRating/Classes (it's a different db table)
 
         if (isArena1v1Enabled)
@@ -1249,6 +1253,14 @@ public:
                 player->PlayerTalkClass->SendCloseGossip();
                 ShowSavedReplays(player, creature);
                 break;
+            case REPLAY_MY_RECENT_MATCHES:
+                player->PlayerTalkClass->SendCloseGossip();
+                ShowMyRecentMatches(player, creature);
+                break;
+            case REPLAY_RECENTLY_WATCHED:
+                player->PlayerTalkClass->SendCloseGossip();
+                ShowRecentlyWatched(player, creature);
+                break;
             case GOSSIP_ACTION_INFO_DEF: // "Back"
                 OnGossipHello(player, creature);
                 break;
@@ -1316,8 +1328,8 @@ public:
                     "SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids "
                     "FROM character_arena_replays "
                     "WHERE FIND_IN_SET('{}', REPLACE(winnerPlayerGuids, ' ', '')) OR FIND_IN_SET('{}', REPLACE(loserPlayerGuids, ' ', '')) "
-                    "ORDER BY id DESC LIMIT 30",
-                    playerGuidStr, playerGuidStr);
+                    "ORDER BY id DESC LIMIT {}",
+                    playerGuidStr, playerGuidStr, GetReplayBrowseLimit());
                 if (!result)
                 {
                     ChatHandler(player->GetSession()).PSendSysMessage("No replays found for player: {}", std::string(code));
@@ -1332,15 +1344,7 @@ public:
                     if (!fields)
                         break;
 
-                    ReplayInfo info;
-                    info.matchId = fields[0].Get<uint32>();
-                    info.winnerTeamName = fields[1].Get<std::string>();
-                    info.winnerTeamRating = fields[2].Get<uint32>();
-                    info.winnerPlayerGuids = fields[3].Get<std::string>();
-                    info.loserTeamName = fields[4].Get<std::string>();
-                    info.loserTeamRating = fields[5].Get<uint32>();
-                    info.loserPlayerGuids = fields[6].Get<std::string>();
-                    infos.push_back(std::move(info));
+                    infos.push_back(BuildReplayInfo(fields));
                 } while (result->NextRow());
 
                 ShowReplays(player, nullptr, infos);
@@ -1367,6 +1371,20 @@ public:
     }
 
 private:
+    static uint32 GetReplayBrowseLimit()
+    {
+        return std::max<uint32>(5, sConfigMgr->GetOption<uint32>("ArenaReplay.Library.BrowseLimit", 20));
+    }
+
+    static uint32 GetRecentMatchesDays()
+    {
+        return std::max<uint32>(1, sConfigMgr->GetOption<uint32>("ArenaReplay.Library.RecentMatchesDays", 30));
+    }
+
+    static bool IsRecentlyWatchedEnabled()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.Library.RecentlyWatched.Enable", true);
+    }
 
     std::string GetClassIconById(uint8 id)
     {
@@ -1459,6 +1477,19 @@ private:
         //uint32 loserMMR;
     };
 
+    static ReplayInfo BuildReplayInfo(Field* fields)
+    {
+        ReplayInfo info;
+        info.matchId = fields[0].Get<uint32>();
+        info.winnerTeamName = fields[1].Get<std::string>();
+        info.winnerTeamRating = fields[2].Get<uint32>();
+        info.winnerPlayerGuids = fields[3].Get<std::string>();
+        info.loserTeamName = fields[4].Get<std::string>();
+        info.loserTeamRating = fields[5].Get<uint32>();
+        info.loserPlayerGuids = fields[6].Get<std::string>();
+        return info;
+    }
+
     std::string GetGossipText(ReplayInfo info) {
         std::string iconsTextTeam1 = GetPlayersIconTexts(info.winnerPlayerGuids);
         std::string iconsTextTeam2 = GetPlayersIconTexts(info.loserPlayerGuids);
@@ -1477,16 +1508,32 @@ private:
         return gossipText;
     }
 
-    void ShowReplaysAllTime(Player* player, Creature* creature, uint8 arenaTypeId)
+    void ShowMyRecentMatches(Player* player, Creature* creature)
     {
-        auto matchInfos = loadReplaysAllTimeByArenaType(arenaTypeId);
+        auto matchInfos = loadRecentMatchesByCharacter(player->GetGUID().GetCounter());
         ShowReplays(player, creature, matchInfos);
     }
 
-    std::vector<ReplayInfo> loadReplaysAllTimeByArenaType(uint8 arenaTypeId)
+    std::vector<ReplayInfo> loadRecentMatchesByCharacter(uint32 characterId)
     {
         std::vector<ReplayInfo> records;
-        QueryResult result = CharacterDatabase.Query("SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids FROM character_arena_replays WHERE arenaTypeId = {} ORDER BY winnerTeamRating DESC LIMIT 20", arenaTypeId);
+
+        std::time_t now = std::time(nullptr);
+        std::tm* tmNow = std::localtime(&now);
+        tmNow->tm_mday -= int(GetRecentMatchesDays());
+        std::mktime(tmNow);
+
+        std::stringstream ss;
+        ss << std::put_time(tmNow, "%Y-%m-%d %H:%M:%S");
+        std::string recentCutoff = ss.str();
+        std::string playerGuidStr = std::to_string(uint64(characterId));
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids "
+            "FROM character_arena_replays "
+            "WHERE timestamp >= '{}' AND (FIND_IN_SET('{}', REPLACE(winnerPlayerGuids, ' ', '')) OR FIND_IN_SET('{}', REPLACE(loserPlayerGuids, ' ', ''))) "
+            "ORDER BY id DESC LIMIT {}",
+            recentCutoff, playerGuidStr, playerGuidStr, GetReplayBrowseLimit());
 
         if (!result)
             return records;
@@ -1497,16 +1544,68 @@ private:
             if (!fields)
                 return records;
 
-            ReplayInfo info;
-            info.matchId = fields[0].Get<uint32>();
-            info.winnerTeamName = fields[1].Get<std::string>();
-            info.winnerTeamRating = fields[2].Get<uint32>();
-            info.winnerPlayerGuids = fields[3].Get<std::string>();
-            info.loserTeamName = fields[4].Get<std::string>();
-            info.loserTeamRating = fields[5].Get<uint32>();
-            info.loserPlayerGuids = fields[6].Get<std::string>();
+            records.push_back(BuildReplayInfo(fields));
+        } while (result->NextRow());
 
-            records.push_back(info);
+        return records;
+    }
+
+    void ShowRecentlyWatched(Player* player, Creature* creature)
+    {
+        auto matchInfos = loadRecentlyWatchedReplays(player->GetGUID().GetCounter());
+        ShowReplays(player, creature, matchInfos);
+    }
+
+    std::vector<ReplayInfo> loadRecentlyWatchedReplays(uint32 characterId)
+    {
+        std::vector<ReplayInfo> records;
+        if (!IsRecentlyWatchedEnabled())
+            return records;
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT r.id, r.winnerTeamName, r.winnerTeamRating, r.winnerPlayerGuids, r.loserTeamName, r.loserTeamRating, r.loserPlayerGuids "
+            "FROM character_recently_watched_replays rw "
+            "JOIN character_arena_replays r ON r.id = rw.replay_id "
+            "WHERE rw.character_id = {} "
+            "ORDER BY rw.last_watched DESC LIMIT {}",
+            characterId, GetReplayBrowseLimit());
+
+        if (!result)
+            return records;
+
+        do
+        {
+            Field* fields = result->Fetch();
+            if (!fields)
+                return records;
+
+            records.push_back(BuildReplayInfo(fields));
+        } while (result->NextRow());
+
+        return records;
+    }
+
+    void ShowReplaysAllTime(Player* player, Creature* creature, uint8 arenaTypeId)
+    {
+        auto matchInfos = loadReplaysAllTimeByArenaType(arenaTypeId);
+        ShowReplays(player, creature, matchInfos);
+    }
+
+    std::vector<ReplayInfo> loadReplaysAllTimeByArenaType(uint8 arenaTypeId)
+    {
+        std::vector<ReplayInfo> records;
+        QueryResult result = CharacterDatabase.Query("SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids FROM character_arena_replays WHERE arenaTypeId = {} ORDER BY winnerTeamRating DESC LIMIT {}", arenaTypeId, GetReplayBrowseLimit());
+
+        if (!result)
+            return records;
+
+        do
+        {
+            Field* fields = result->Fetch();
+            if (!fields)
+                return records;
+
+            records.push_back(BuildReplayInfo(fields));
         } while (result->NextRow());
 
         return records;
@@ -1536,7 +1635,7 @@ private:
             "SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids, timestamp "
             "FROM character_arena_replays "
             "WHERE arenaTypeId = {} AND timestamp >= '{}' "
-            "ORDER BY id DESC LIMIT 20", arenaTypeId, thirtyDaysAgo.c_str());
+            "ORDER BY id DESC LIMIT {}", arenaTypeId, thirtyDaysAgo.c_str(), GetReplayBrowseLimit());
 
         if (!result)
             return records;
@@ -1547,16 +1646,7 @@ private:
             if (!fields)
                 return records;
 
-            ReplayInfo info;
-            info.matchId = fields[0].Get<uint32>();
-            info.winnerTeamName = fields[1].Get<std::string>();
-            info.winnerTeamRating = fields[2].Get<uint32>();
-            info.winnerPlayerGuids = fields[3].Get<std::string>();
-            info.loserTeamName = fields[4].Get<std::string>();
-            info.loserTeamRating = fields[5].Get<uint32>();
-            info.loserPlayerGuids = fields[6].Get<std::string>();
-
-            records.push_back(info);
+            records.push_back(BuildReplayInfo(fields));
         } while (result->NextRow());
 
         return records;
@@ -1593,7 +1683,7 @@ private:
             "SELECT id, winnerTeamName, winnerTeamRating, winnerPlayerGuids, loserTeamName, loserTeamRating, loserPlayerGuids "
             "FROM character_arena_replays "
             "ORDER BY timesWatched DESC, winnerTeamRating DESC "
-            "LIMIT 28");
+            "LIMIT {}", GetReplayBrowseLimit());
 
         if (!result)
             return records;
@@ -1604,16 +1694,7 @@ private:
             if (!fields)
                 return records;
 
-            ReplayInfo info;
-            info.matchId = fields[0].Get<uint32>();
-            info.winnerTeamName = fields[1].Get<std::string>();
-            info.winnerTeamRating = fields[2].Get<uint32>();
-            info.winnerPlayerGuids = fields[3].Get<std::string>();
-            info.loserTeamName = fields[4].Get<std::string>();
-            info.loserTeamRating = fields[5].Get<uint32>();
-            info.loserPlayerGuids = fields[6].Get<std::string>();
-
-            records.push_back(info);
+            records.push_back(BuildReplayInfo(fields));
         } while (result->NextRow());
 
         return records;
@@ -1628,8 +1709,8 @@ private:
             "SELECT r.id, r.winnerTeamName, r.winnerTeamRating, r.winnerPlayerGuids, r.loserTeamName, r.loserTeamRating, r.loserPlayerGuids "
             "FROM character_saved_replays s "
             "JOIN character_arena_replays r ON r.id = s.replay_id "
-            "WHERE s.character_id = {} ORDER BY s.id {} LIMIT 29",
-            player->GetGUID().GetCounter(), sortOrder);
+            "WHERE s.character_id = {} ORDER BY s.id {} LIMIT {}",
+            player->GetGUID().GetCounter(), sortOrder, GetReplayBrowseLimit());
         if (!result)
             AddGossipItemFor(player, GOSSIP_ICON_TAXI, "No saved replays found.", REPLAY_GOSSIP_SENDER_SELECT, GOSSIP_ACTION_INFO_DEF);
         else
@@ -1641,15 +1722,7 @@ private:
                 if (!fields)
                     break;
 
-                ReplayInfo info;
-                info.matchId = fields[0].Get<uint32>();
-                info.winnerTeamName = fields[1].Get<std::string>();
-                info.winnerTeamRating = fields[2].Get<uint32>();
-                info.winnerPlayerGuids = fields[3].Get<std::string>();
-                info.loserTeamName = fields[4].Get<std::string>();
-                info.loserTeamRating = fields[5].Get<uint32>();
-                info.loserPlayerGuids = fields[6].Get<std::string>();
-                infos.push_back(std::move(info));
+                infos.push_back(BuildReplayInfo(fields));
             } while (result->NextRow());
 
             ShowReplays(player, creature, infos);
@@ -1659,13 +1732,25 @@ private:
         SendGossipMenuFor(player, DEFAULT_GOSSIP_MESSAGE, creature ? creature->GetGUID() : player->GetGUID());
     }
 
+    void RecordReplayWatch(uint32 characterId, uint32 replayId)
+    {
+        if (!IsRecentlyWatchedEnabled())
+            return;
+
+        CharacterDatabase.Execute(
+            "INSERT INTO character_recently_watched_replays (character_id, replay_id, last_watched, watch_count) "
+            "VALUES ({}, {}, CURRENT_TIMESTAMP, 1) "
+            "ON DUPLICATE KEY UPDATE last_watched = CURRENT_TIMESTAMP, watch_count = watch_count + 1",
+            characterId, replayId);
+    }
+
     void FavoriteMatchId(uint64 playerGuid, uint32 code)
     {
         // Need to check if the match exists in character_arena_replays, then insert in character_saved_replays
         QueryResult result = CharacterDatabase.Query("SELECT id FROM character_arena_replays WHERE id = " + std::to_string(code));
         if (result)
         {
-            std::string query = "INSERT INTO character_saved_replays (character_id, replay_id) VALUES (" + std::to_string(playerGuid) + ", " + std::to_string(code) + ")";
+            std::string query = "INSERT IGNORE INTO character_saved_replays (character_id, replay_id) VALUES (" + std::to_string(playerGuid) + ", " + std::to_string(code) + ")";
             CharacterDatabase.Execute(query.c_str());
 
             if (Player* player = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(playerGuid)))
@@ -1817,6 +1902,7 @@ private:
         deserializeMatchData(record, fields);
 
         loadedReplays[p->GetGUID().GetCounter()] = std::move(record);
+        RecordReplayWatch(p->GetGUID().GetCounter(), matchId);
         return true;
     }
 
@@ -1909,6 +1995,12 @@ private:
             if (deleteSavedReplays)
                 CharacterDatabase.Execute("DELETE FROM `character_saved_replays` WHERE `replay_id` NOT IN (SELECT `id` FROM `character_arena_replays`)");
         }
+
+        CharacterDatabase.Execute("DELETE FROM `character_recently_watched_replays` WHERE `replay_id` NOT IN (SELECT `id` FROM `character_arena_replays`)");
+
+        const auto recentWatchDays = sConfigMgr->GetOption<uint32>("ArenaReplay.Library.RecentlyWatched.RetentionDays", 90);
+        if (recentWatchDays > 0)
+            CharacterDatabase.Execute("DELETE FROM `character_recently_watched_replays` WHERE `last_watched` < (NOW() - INTERVAL {} DAY)", recentWatchDays);
     }
 };
 
