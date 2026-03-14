@@ -50,21 +50,15 @@ This branch adds a new **Replay Actor Spectate** layer. It does not yet spawn fu
 This is **clone-target spectating scaffolding**, not the final cloned-actor / GUID-remap engine. The camera now follows recorded participant tracks instead of relying only on winner/loser POV anchor tracks, but it still does not spawn fully remapped duplicate units yet.
 
 
-## RTG modernization notes (viewer isolation / camera stability pass)
+### Replay viewer isolation and camera stability
+The replay viewer now re-enters the replay battleground as a **neutral spectator-only entity** instead of borrowing a live arena team slot. This keeps the viewer from polluting live team counters and makes replay actor counts authoritative for POV cycling.
 
-This pass hardens replay playback toward the intended **true spectator** model.
+### Replay camera behavior
+The replay camera now:
+- stabilizes the viewer with no-gravity / hover / fly movement while replay playback is active
+- restores those movement flags on replay exit
+- applies actor selection changes immediately when stepping next/previous POVs
+- uses interpolated actor track frames for smoother follow movement
 
-### What changed
-- Replay viewers now enter playback as **TEAM_NEUTRAL** spectators instead of seeding a replay arena team roster.
-- Replay camera movement is stabilized with explicit spectator movement-state handling during playback.
-- Actor follow now uses interpolated actor frames instead of only the last sampled frame.
-- Replay fallback anchoring now uses a replay-space anchor instead of the player's original world-map anchor.
-- Replay HUD/chat output now uses AzerothCore-safe formatting, fixing literal `%s` output.
-- Replay exit flow now preserves the saved anchor session long enough to return the viewer correctly.
-
-### Intent
-These changes are aimed at the current modernization direction:
-- viewer is not a combatant
-- actor tracks remain the only replay combatant source
-- camera behavior is more stable and readable
-- replay sessions can be reopened repeatedly without spectator-state pollution
+### Replay exit safety
+Replay exit now restores movement control and spectator stabilization flags before returning the player to their saved anchor, preventing stuck levitation after leaving playback.
