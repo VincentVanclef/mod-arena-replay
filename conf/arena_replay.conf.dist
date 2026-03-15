@@ -272,10 +272,10 @@ ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
 #                     Lower values can make follow behavior feel smoother, but
 #                     overly aggressive values may produce extra movement churn.
 #
-#        Default:     100
+#        Default:     125
 #
-#        Example:     ArenaReplay.ActorSpectate.TeleportMs = 150
-#                     Updates spectator follow position every 150 ms.
+#        Example:     ArenaReplay.ActorSpectate.TeleportMs = 125
+#                     Updates spectator follow position every 125 ms.
 #
 #    ArenaReplay.ActorSpectate.StartOnWinnerTeam
 #        Description: Determines the initial side chosen when actor spectate
@@ -309,19 +309,19 @@ ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
 #                     but can worsen stutter or replay-end instability on older
 #                     recordings.
 #
-#        Default:     60
-#                     Minimum effective runtime value is 20.
+#        Default:     40
+#                     Minimum effective runtime value is 15.
 #
-#        Example:     ArenaReplay.Playback.PacketBudgetPerUpdate = 40
-#                     Uses a gentler playback burst size for smoother viewing.
+#        Example:     ArenaReplay.Playback.PacketBudgetPerUpdate = 30
+#                     Uses a gentler playback burst size for smoother arena viewing.
 #
 
 ArenaReplay.ActorSpectate.Enable = 1
 ArenaReplay.ActorSpectate.SampleMs = 250
-ArenaReplay.ActorSpectate.TeleportMs = 100
+ArenaReplay.ActorSpectate.TeleportMs = 125
 ArenaReplay.ActorSpectate.StartOnWinnerTeam = 1
 ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant = 1
-ArenaReplay.Playback.PacketBudgetPerUpdate = 60
+ArenaReplay.Playback.PacketBudgetPerUpdate = 40
 
 ########################################
 # ArenaReplay Spectator Restrictions

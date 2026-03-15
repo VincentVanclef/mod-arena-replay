@@ -155,6 +155,8 @@ struct ActiveReplaySession
     bool replayComplete = false;
     uint32 replayCompleteAtMs = 0;
     uint32 packetBudgetPerUpdate = 60;
+    uint64 lastAppliedActorGuid = 0;
+    uint32 lastAppliedActorFlatIndex = 0;
 };
 struct LiveActorRecorderState
 {
@@ -473,6 +475,20 @@ namespace
         }
     }
 
+    static bool IsReplayPacketOpcodeAllowedForPlayback(Opcodes opcode)
+    {
+        switch (opcode)
+        {
+            case CMSG_CAST_SPELL:
+            case CMSG_CANCEL_CAST:
+            case CMSG_MESSAGECHAT:
+            case CMSG_MOUNTSPECIAL_ANIM:
+                return false;
+            default:
+                return true;
+        }
+    }
+
     static bool IsReplayHudAllowed(Player* player)
     {
         if (!player || !player->GetSession())
@@ -490,7 +506,17 @@ namespace
         if (!bg || !bg->isArena())
             return false;
 
-        if (bgReplayIds.find(bg->GetInstanceID()) == bgReplayIds.end())
+        if (session.battlegroundInstanceId == 0 || bg->GetInstanceID() != session.battlegroundInstanceId)
+            return false;
+
+        auto replayIt = bgReplayIds.find(bg->GetInstanceID());
+        if (replayIt == bgReplayIds.end())
+            return false;
+
+        if (replayIt->second != player->GetGUID().GetCounter())
+            return false;
+
+        if (loadedReplays.find(player->GetGUID().GetCounter()) == loadedReplays.end())
             return false;
 
         return true;
@@ -519,16 +545,18 @@ namespace
         if (track.guid == 0 || track.frames.empty())
             return false;
 
-        bool haveValidFrame = false;
+        uint32 validFrames = 0;
         for (ActorFrame const& frame : track.frames)
         {
             if (!std::isfinite(frame.x) || !std::isfinite(frame.y) || !std::isfinite(frame.z) || !std::isfinite(frame.o))
                 continue;
-            haveValidFrame = true;
-            break;
+
+            ++validFrames;
+            if (validFrames >= 2)
+                return true;
         }
 
-        return haveValidFrame;
+        return validFrames > 0;
     }
 
     static void SanitizeActorTracks(std::vector<ActorTrack>& tracks)
@@ -537,11 +565,19 @@ namespace
         {
             std::vector<ActorFrame> sanitized;
             sanitized.reserve(track.frames.size());
+            uint32 lastTimestamp = 0;
+            bool haveLastTimestamp = false;
             for (ActorFrame const& frame : track.frames)
             {
                 if (!std::isfinite(frame.x) || !std::isfinite(frame.y) || !std::isfinite(frame.z) || !std::isfinite(frame.o))
                     continue;
+
+                if (haveLastTimestamp && frame.timestamp < lastTimestamp)
+                    continue;
+
                 sanitized.push_back(frame);
+                lastTimestamp = frame.timestamp;
+                haveLastTimestamp = true;
             }
 
             std::sort(sanitized.begin(), sanitized.end(), [](ActorFrame const& a, ActorFrame const& b)
@@ -549,25 +585,56 @@ namespace
                 return a.timestamp < b.timestamp;
             });
             track.frames.swap(sanitized);
+            if (track.name.empty())
+                track.name = "Unknown";
         }
 
-        tracks.erase(std::remove_if(tracks.begin(), tracks.end(), [](ActorTrack const& track)
+        std::unordered_map<uint64, size_t> bestTrackByGuid;
+        std::vector<ActorTrack> deduped;
+        deduped.reserve(tracks.size());
+        for (ActorTrack& track : tracks)
         {
-            return !IsReplayActorTrackPlayable(track);
-        }), tracks.end());
+            if (!IsReplayActorTrackPlayable(track))
+                continue;
+
+            auto it = bestTrackByGuid.find(track.guid);
+            if (it == bestTrackByGuid.end())
+            {
+                bestTrackByGuid[track.guid] = deduped.size();
+                deduped.push_back(std::move(track));
+                continue;
+            }
+
+            ActorTrack& existing = deduped[it->second];
+            if (track.frames.size() > existing.frames.size())
+                existing = std::move(track);
+        }
+
+        tracks.swap(deduped);
     }
 
     static std::vector<ReplayActorSelectionRef> BuildPlayableReplayActorSelections(MatchRecord const& match)
     {
         std::vector<ReplayActorSelectionRef> refs;
+        std::unordered_set<uint64> seenGuids;
 
         for (uint32 i = 0; i < match.winnerActorTracks.size(); ++i)
-            if (IsReplayActorTrackPlayable(match.winnerActorTracks[i]))
-                refs.push_back({ true, i });
+        {
+            ActorTrack const& track = match.winnerActorTracks[i];
+            if (!IsReplayActorTrackPlayable(track) || seenGuids.find(track.guid) != seenGuids.end())
+                continue;
+            seenGuids.insert(track.guid);
+            refs.push_back({ true, i });
+        }
 
         for (uint32 i = 0; i < match.loserActorTracks.size(); ++i)
-            if (IsReplayActorTrackPlayable(match.loserActorTracks[i]))
-                refs.push_back({ false, i });
+        {
+            ActorTrack const& track = match.loserActorTracks[i];
+            if (!IsReplayActorTrackPlayable(track) || seenGuids.find(track.guid) != seenGuids.end())
+                continue;
+            seenGuids.insert(track.guid);
+            refs.push_back({ false, i });
+        }
 
         return refs;
     }
@@ -724,6 +791,10 @@ namespace
             if (viewerSessionIt == activeReplaySessions.end() || viewerSessionIt->second.teardownInProgress)
                 continue;
 
+            ActiveReplaySession const& viewerSession = viewerSessionIt->second;
+            if (viewerSession.battlegroundInstanceId != session.battlegroundInstanceId || viewerSession.replayId != session.replayId)
+                continue;
+
             ++count;
             std::ostringstream e;
             e << viewer->GetGUID().GetCounter() << ',' << viewer->GetName() << ',' << GetClassToken(viewer->getClass()) << ',' << GetClassIconPath(viewer->getClass());
@@ -776,6 +847,7 @@ namespace
         player->SetDisableGravity(false);
         player->SetHover(false);
         player->SetClientControl(player, true);
+        player->StopMoving();
 
         if (session.viewerHidden || !player->IsVisible())
             player->SetVisible(true);
@@ -815,16 +887,14 @@ namespace
 
         it->second.teardownInProgress = true;
         ActiveReplaySession session = it->second;
-        loadedReplays.erase(viewerKey);
         SendReplayHudEnd(player);
         RestoreReplayViewerState(player, session);
+        loadedReplays.erase(viewerKey);
 
-        // Prefer a single deterministic world return instead of stacking
-        // battleground leave and an extra manual teleport in the same flow.
-        if (session.anchorMapId != 0)
-            ReturnReplayViewerToAnchor(player, session);
-        else if (bg && player->GetBattlegroundId() == bg->GetInstanceID())
+        if (bg && player->GetBattlegroundId() == bg->GetInstanceID())
             player->LeaveBattleground(bg);
+        else if (session.anchorMapId != 0)
+            ReturnReplayViewerToAnchor(player, session);
 
         activeReplaySessions.erase(viewerKey);
     }
@@ -914,9 +984,13 @@ namespace
             session.viewerHidden = true;
         }
 
+        bool actorChanged = (session.lastAppliedActorGuid != track->guid || session.lastAppliedActorFlatIndex != flatIndex);
+        if (actorChanged)
+            forceImmediate = true;
+
         if (!forceImmediate && session.nextActorTeleportMs > nowMs)
             return true;
-        session.nextActorTeleportMs = nowMs + sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.TeleportMs", 100);
+        session.nextActorTeleportMs = nowMs + sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.TeleportMs", 125);
 
         bool haveFrame = false;
         ActorFrame frame = GetInterpolatedActorFrame(*track, nowMs, haveFrame);
@@ -939,6 +1013,8 @@ namespace
         else if (std::abs(replayer->GetOrientation() - frame.o) > 0.05f)
             replayer->SetFacingTo(frame.o);
         session.actorSpectateActive = true;
+        session.lastAppliedActorGuid = track->guid;
+        session.lastAppliedActorFlatIndex = flatIndex;
         return true;
     }
 
@@ -967,7 +1043,9 @@ namespace
         session.teardownInProgress = false;
         session.replayComplete = false;
         session.replayCompleteAtMs = 0;
-        session.packetBudgetPerUpdate = std::max<uint32>(20u, sConfigMgr->GetOption<uint32>("ArenaReplay.Playback.PacketBudgetPerUpdate", 60));
+        session.packetBudgetPerUpdate = std::max<uint32>(15u, sConfigMgr->GetOption<uint32>("ArenaReplay.Playback.PacketBudgetPerUpdate", 40));
+        session.lastAppliedActorGuid = 0;
+        session.lastAppliedActorFlatIndex = 0;
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
         {
@@ -1106,13 +1184,16 @@ public:
         // send replay data to spectator first so actors exist client-side before camera positioning,
         // but cap burst size to avoid hitching and client overload on older replays.
         uint32 packetsSentThisUpdate = 0;
-        uint32 packetBudgetPerUpdate = std::max<uint32>(20u, session.packetBudgetPerUpdate);
+        uint32 packetBudgetPerUpdate = std::max<uint32>(15u, session.packetBudgetPerUpdate);
         while (!match.packets.empty() && match.packets.front().timestamp <= bg->GetStartTime() && packetsSentThisUpdate < packetBudgetPerUpdate)
         {
             WorldPacket* myPacket = &match.packets.front().packet;
-            replayer->GetSession()->SendPacket(myPacket);
+            if (IsReplayPacketOpcodeAllowedForPlayback(myPacket->GetOpcode()))
+            {
+                replayer->GetSession()->SendPacket(myPacket);
+                ++packetsSentThisUpdate;
+            }
             match.packets.pop_front();
-            ++packetsSentThisUpdate;
         }
 
         if (match.packets.empty())
@@ -1138,7 +1219,7 @@ public:
         if (sessionIt != activeReplaySessions.end())
         {
             if (session.replayWarmupUntilMs == 1500)
-                session.replayWarmupUntilMs = bg->GetStartTime() + 1500;
+                session.replayWarmupUntilMs = bg->GetStartTime() + 1000;
             if (session.teardownInProgress)
                 return;
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime());
@@ -2199,6 +2280,13 @@ private:
         MatchRecord record;
         deserializeMatchData(record, fields);
 
+        if (record.packets.empty())
+        {
+            ChatHandler(p->GetSession()).PSendSysMessage("Replay data is incomplete or unsafe for playback.");
+            CloseGossipMenuFor(p);
+            return false;
+        }
+
         loadedReplays[p->GetGUID().GetCounter()] = std::move(record);
         RecordReplayWatch(p->GetGUID().GetCounter(), matchId);
         return true;
@@ -2236,6 +2324,13 @@ private:
             if (packetSize > (buffer.size() - buffer.rpos()))
                 break;
 
+            if (packetSize > 524288)
+            {
+                std::vector<uint8> ignored(packetSize, 0);
+                buffer.read(ignored.data(), packetSize);
+                continue;
+            }
+
             WorldPacket packet(opcode, packetSize);
 
             if (packetSize > 0)
@@ -2244,6 +2339,9 @@ private:
                 buffer.read(tmp.data(), packetSize);
                 packet.append(tmp.data(), packetSize);
             }
+
+            if (!IsReplayPacketOpcodeAllowedForPlayback(packet.GetOpcode()))
+                continue;
 
             record.packets.push_back({ packetTimestamp, packet });
         }

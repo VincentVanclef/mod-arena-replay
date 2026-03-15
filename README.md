@@ -73,3 +73,20 @@ This packaging is now tuned primarily for **arena-only replay** on RTG. Battlegr
 
 ### Current architecture note
 This remains a **hidden spectator-anchor replay system**, not a full cloned-actor renderer. The module is materially more stable for arena-only use, but legacy replay compatibility still depends on the quality of the recorded packet/actor data.
+
+
+## RTG 5.3.0 arena replay hardening notes
+
+This pass focuses on making arena-only replay playback safer and more deterministic rather than pretending the module is already a perfect clone-renderer.
+
+### Included fixes
+- replay HUD gating now verifies the active replay session, owning battleground instance, and loaded replay payload before replay UI traffic is allowed
+- watcher HUD output only counts viewers attached to the same replay session instead of every player in the battleground container
+- actor-track sanitization now removes malformed frames, normalizes empty names, and de-duplicates duplicate actor GUID tracks by keeping the strongest usable track
+- replay POV application now forces an immediate camera reposition when the selected actor changes instead of waiting for the normal follow throttle window
+- replay playback now drops unsafe client-origin opcodes from old recordings and refuses obviously oversized packet payloads during replay deserialization
+- replay exit now prefers one battleground leave path when still attached to the replay battleground, with manual anchor return only as a fallback
+- arena-only playback pacing defaults were reduced to safer values for packet burst budget and actor follow teleport cadence
+
+### Current architecture note
+This is still a hidden spectator-anchor replay system. It is substantially tighter and safer for arena replay viewing, but it is not yet a full cloned-actor scene renderer.
