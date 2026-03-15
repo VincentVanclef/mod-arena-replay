@@ -475,7 +475,7 @@ namespace
         }
     }
 
-    static bool IsReplayPacketOpcodeAllowedForPlayback(Opcodes opcode)
+    static bool IsReplayPacketOpcodeAllowedForPlayback(uint16 opcode)
     {
         switch (opcode)
         {
