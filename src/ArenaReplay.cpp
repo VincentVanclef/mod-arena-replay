@@ -131,8 +131,6 @@ struct MatchRecord
 };
 struct BgPlayersGuids { std::string alliancePlayerGuids; std::string hordePlayerGuids; };
 struct TeamRecorders { ObjectGuid alliance; ObjectGuid horde; };
-static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok);
-
 struct ReplayCloneBinding
 {
     uint64 actorGuid = 0;
@@ -204,6 +202,7 @@ uint64 gReplayTraceCounter = 0;
 namespace
 {
     static void ResetActorReplayView(Player* replayer, ActiveReplaySession& session);
+    static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok);
 
     enum class ReplayDebugFlag
     {
