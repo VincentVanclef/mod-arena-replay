@@ -380,6 +380,81 @@ ArenaReplay.ActorSpectate.SnapDistance = 1.10
 ArenaReplay.ActorSpectate.OrientationLerpPct = 0.45
 ArenaReplay.Playback.PacketBudgetPerUpdate = 40
 
+
+########################################
+# ArenaReplay Clone Scene
+########################################
+#
+#    ArenaReplay.CloneScene.Enable
+#        Description: Enables the replay clone-scene layer.
+#
+#                     When enabled, replay actor surrogates are spawned inside
+#                     the replay arena and synchronized from recorded actor
+#                     tracks so both teams remain visible even when the viewer
+#                     was a participant in the original match.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.Enable = 1
+#                     Replay playback uses synchronized surrogate actors.
+#
+#    ArenaReplay.CloneScene.UseViewpoint
+#        Description: Binds the replay viewer camera to a hidden replay camera
+#                     anchor instead of relying only on the live viewer body.
+#
+#                     This is the core spectator-shell switch that keeps the
+#                     viewer hidden and camera-driven while replay actors remain
+#                     separate scene entities.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.UseViewpoint = 1
+#                     Replay playback drives the camera through the clone-scene
+#                     anchor rather than direct body-follow only.
+#
+#    ArenaReplay.CloneScene.CloneEntry
+#        Description: Creature entry used for replay surrogate actor clones.
+#
+#                     Change this only if your realm uses a dedicated replay
+#                     surrogate creature template for actor bodies.
+#
+#        Default:     91012
+#
+#        Example:     ArenaReplay.CloneScene.CloneEntry = 91012
+#                     Replay actor surrogates are spawned from creature 91012.
+#
+#    ArenaReplay.CloneScene.CameraAnchorEntry
+#        Description: Creature entry used for the hidden replay camera anchor.
+#
+#                     By default this reuses the clone entry. Set a dedicated
+#                     entry only if you want a separate invisible/utility camera
+#                     anchor creature template.
+#
+#        Default:     91012
+#
+#        Example:     ArenaReplay.CloneScene.CameraAnchorEntry = 91012
+#                     The replay camera anchor uses creature 91012.
+#
+#    ArenaReplay.CloneScene.SyncMs
+#        Description: Interval, in milliseconds, used when synchronizing replay
+#                     surrogate clones from actor tracks.
+#
+#                     Lower values give tighter clone motion at the cost of more
+#                     teleport/sync churn during playback.
+#
+#        Default:     50
+#
+#        Example:     ArenaReplay.CloneScene.SyncMs = 40
+#                     Replay clones are updated every 40 ms.
+#
+ArenaReplay.CloneScene.Enable = 1
+ArenaReplay.CloneScene.UseViewpoint = 1
+ArenaReplay.CloneScene.CloneEntry = 91012
+ArenaReplay.CloneScene.CameraAnchorEntry = 91012
+ArenaReplay.CloneScene.SyncMs = 50
+
 ########################################
 # ArenaReplay Spectator Restrictions
 ########################################

@@ -148,3 +148,23 @@ This pass moves ArenaReplay away from the loose self-actor bridge model and back
 
 ### Important limitation
 This module still does **not** record full appearance/equipment snapshots, so the spawned replay clones are currently **surrogate clones**, not perfect visual replicas. They exist to restore actor presence in the scene, especially for self-watch and team completeness, while the deeper clone pipeline is being built.
+
+
+## RTG 5.4.0 spectator-shell clone-scene notes
+
+This pass pushes ArenaReplay into a stricter four-layer replay architecture:
+
+- **Spectator shell** — replay viewers are forced into spectator state and hidden while the replay runs.
+- **Clone scene** — actor surrogates are synchronized for both teams from recorded actor tracks.
+- **Viewpoint camera** — a hidden camera anchor owns the replay viewpoint instead of only the viewer body.
+- **Hard teardown** — replay exit explicitly clears viewpoint binding, despawns scene entities, and restores spectator movement state.
+
+### New config
+- `ArenaReplay.CloneScene.Enable`
+- `ArenaReplay.CloneScene.UseViewpoint`
+- `ArenaReplay.CloneScene.CloneEntry`
+- `ArenaReplay.CloneScene.CameraAnchorEntry`
+- `ArenaReplay.CloneScene.SyncMs`
+
+### Important limitation
+This is still a **surrogate clone scene** rather than the final full appearance-mirror system. Replay data still lacks a persistent equipment/appearance snapshot, so actor bodies are positional replay surrogates rather than perfect player replicas.
