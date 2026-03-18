@@ -131,6 +131,8 @@ struct MatchRecord
 };
 struct BgPlayersGuids { std::string alliancePlayerGuids; std::string hordePlayerGuids; };
 struct TeamRecorders { ObjectGuid alliance; ObjectGuid horde; };
+static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok);
+
 struct ReplayCloneBinding
 {
     uint64 actorGuid = 0;
@@ -1015,7 +1017,7 @@ namespace
         {
             for (ReplayCloneBinding const& binding : session.cloneBindings)
                 if (Creature* clone = viewer->GetMap()->GetCreature(binding.cloneGuid))
-                    clone->DespawnOrUnsummon(0);
+                    clone->DespawnOrUnsummon(Milliseconds(0));
         }
 
         session.cloneBindings.clear();
