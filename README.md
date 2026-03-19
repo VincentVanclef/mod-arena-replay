@@ -185,3 +185,13 @@ Current snapshot coverage is intentionally conservative and records:
 - mainhand, offhand, and ranged item display ids
 
 This gives clone-scene playback a stable identity/weapon-visual bridge while preserving room for later expansion into full player-bytes / armor appearance capture.
+
+
+## Replay entry attach-state hardening (5.4.3)
+
+Replay startup now waits for the spectator to be fully attached to the replay battleground map before clone-scene build, viewpoint binding, or the first actor apply step runs. This prevents arena coordinates from being applied against the viewer while the client is still on the source world map, which previously manifested as Great Sea/fatigue teleports, abyss falls, and stuck spectator-shell states.
+
+New debug signatures emitted by this pass:
+- `[RTG][REPLAY][ATTACH_WAIT]`
+- `[RTG][REPLAY][ATTACH_OK]`
+- `[RTG][REPLAY][ATTACH_TIMEOUT]`

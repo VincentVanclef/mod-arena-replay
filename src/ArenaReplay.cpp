@@ -198,6 +198,10 @@ struct ActiveReplaySession
     ObjectGuid cameraAnchorGuid;
     bool viewpointBound = false;
     bool spectatorShellActive = false;
+    bool awaitingReplayMapAttach = false;
+    bool replayMapAttached = false;
+    uint32 replayAttachDeadlineMs = 0;
+    uint32 nextAttachLogMs = 0;
     uint32 cameraStallCount = 0;
     float lastCameraX = 0.0f;
     float lastCameraY = 0.0f;
@@ -227,6 +231,7 @@ namespace
     static Creature* EnsureReplayCameraAnchor(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void BindReplayViewpoint(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void ClearReplayViewpoint(Player* viewer, ActiveReplaySession& session);
+    static bool IsReplayViewerMapAttached(Player* viewer, Battleground* bg, ActiveReplaySession const& session);
 
     enum class ReplayDebugFlag
     {
@@ -1009,7 +1014,26 @@ namespace
             session.anchorPosition.GetOrientation());
     }
 
-    static constexpr uint32 REPLAY_SURROGATE_CLONE_ENTRY = 91012;
+    static bool IsReplayViewerMapAttached(Player* viewer, Battleground* bg, ActiveReplaySession const& session)
+    {
+        if (!viewer || !bg || !viewer->GetMap())
+            return false;
+
+        if (viewer->GetMapId() != bg->GetMapId())
+            return false;
+
+        if (viewer->GetBattlegroundId() != session.battlegroundInstanceId)
+            return false;
+
+        Battleground* playerBg = viewer->GetBattleground();
+        if (!playerBg || playerBg->GetInstanceID() != bg->GetInstanceID())
+            return false;
+
+        if (!viewer->GetMap()->IsBattlegroundOrArena())
+            return false;
+
+        return true;
+    }
 
     static Creature* FindReplayCameraAnchor(Player* viewer, ActiveReplaySession const& session)
     {
@@ -1763,6 +1787,10 @@ namespace
         session.cameraAnchorGuid.Clear();
         session.viewpointBound = false;
         session.spectatorShellActive = false;
+        session.awaitingReplayMapAttach = false;
+        session.replayMapAttached = false;
+        session.replayAttachDeadlineMs = 0;
+        session.nextAttachLogMs = 0;
         session.cameraStallCount = 0;
         session.lastCameraX = player->GetPositionX();
         session.lastCameraY = player->GetPositionY();
@@ -1918,6 +1946,71 @@ public:
 
         ActiveReplaySession& session = sessionIt->second;
 
+        if (session.awaitingReplayMapAttach || !session.replayMapAttached)
+        {
+            if (session.replayAttachDeadlineMs == 0)
+                session.replayAttachDeadlineMs = bg->GetStartTime() + 5000;
+
+            bool attached = IsReplayViewerMapAttached(replayer, bg, session);
+            if (!attached)
+            {
+                if (ReplayDebugEnabled(ReplayDebugFlag::General) && (session.nextAttachLogMs == 0 || bg->GetStartTime() >= session.nextAttachLogMs))
+                {
+                    session.nextAttachLogMs = bg->GetStartTime() + 1000;
+                    std::ostringstream ss;
+                    ss << "playerMap=" << replayer->GetMapId()
+                       << " replayMap=" << bg->GetMapId()
+                       << " playerBg=" << replayer->GetBattlegroundId()
+                       << " sessionBg=" << session.battlegroundInstanceId
+                       << " hasBg=" << (replayer->GetBattleground() ? 1 : 0)
+                       << " isBgMap=" << ((replayer->GetMap() && replayer->GetMap()->IsBattlegroundOrArena()) ? 1 : 0)
+                       << " nowMs=" << bg->GetStartTime()
+                       << " deadlineMs=" << session.replayAttachDeadlineMs;
+                    ReplayLog(ReplayDebugFlag::General, &session, replayer, "ATTACH_WAIT", ss.str());
+                }
+
+                if (bg->GetStartTime() >= session.replayAttachDeadlineMs)
+                {
+                    if (ReplayDebugEnabled(ReplayDebugFlag::Teardown))
+                    {
+                        std::ostringstream ss;
+                        ss << "playerMap=" << replayer->GetMapId()
+                           << " replayMap=" << bg->GetMapId()
+                           << " playerBg=" << replayer->GetBattlegroundId()
+                           << " sessionBg=" << session.battlegroundInstanceId
+                           << " nowMs=" << bg->GetStartTime();
+                        ReplayLog(ReplayDebugFlag::Teardown, &session, replayer, "ATTACH_TIMEOUT", ss.str());
+                    }
+                    RequestReplayTeardown(replayer, bg, "attach_timeout", 0);
+                }
+                return;
+            }
+
+            session.awaitingReplayMapAttach = false;
+            session.replayMapAttached = true;
+            session.replayAttachDeadlineMs = 0;
+            session.nextAttachLogMs = 0;
+            session.replayWarmupUntilMs = bg->GetStartTime() + 1000;
+
+            if (ReplayDebugEnabled(ReplayDebugFlag::General))
+            {
+                std::ostringstream ss;
+                ss << "playerMap=" << replayer->GetMapId()
+                   << " replayMap=" << bg->GetMapId()
+                   << " playerBg=" << replayer->GetBattlegroundId()
+                   << " sessionBg=" << session.battlegroundInstanceId
+                   << " nowMs=" << bg->GetStartTime();
+                ReplayLog(ReplayDebugFlag::General, &session, replayer, "ATTACH_OK", ss.str());
+            }
+
+            BuildReplayActorCloneScene(replayer, match, session);
+            BindReplayViewpoint(replayer, match, session);
+            ApplyActorReplayView(replayer, match, session, bg->GetStartTime(), true);
+            SendReplayHudPov(replayer, match, session, true);
+            session.nextHudWatcherSyncMs = 0;
+            SendReplayHudWatchers(bg, replayer, match, session, true);
+        }
+
         // send replay data to spectator first so actors exist client-side before camera positioning,
         // but cap burst size to avoid hitching and client overload on older replays.
         uint32 packetsSentThisUpdate = 0;
@@ -1950,7 +2043,7 @@ public:
 
         if (sessionIt != activeReplaySessions.end())
         {
-            if (session.replayWarmupUntilMs == 1500)
+            if (session.replayMapAttached && session.replayWarmupUntilMs == 1500)
                 session.replayWarmupUntilMs = bg->GetStartTime() + 1000;
             if (ReplayDebugEnabled(ReplayDebugFlag::Playback) && (session.lastPlaybackLogMs == 0 || (bg->GetStartTime() >= session.lastPlaybackLogMs + 1000) || session.replayComplete))
             {
@@ -2969,6 +3062,10 @@ private:
         replaySession.actorTrackIndex = 0;
         replaySession.nextActorTeleportMs = 0;
         replaySession.replayWarmupUntilMs = 1500;
+        replaySession.awaitingReplayMapAttach = true;
+        replaySession.replayMapAttached = false;
+        replaySession.replayAttachDeadlineMs = 0;
+        replaySession.nextAttachLogMs = 0;
 
         if (viewerWasParticipant && sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant", true))
         {
@@ -3001,9 +3098,6 @@ private:
             }
         }
 
-        BuildReplayActorCloneScene(player, record, replaySession);
-        BindReplayViewpoint(player, record, replaySession);
-        ApplyActorReplayView(player, loadedReplays[player->GetGUID().GetCounter()], replaySession, 0, true);
         handler.PSendSysMessage("Replay ID {} begins.", replayId);
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.LockMovement", true))
@@ -3282,7 +3376,7 @@ public:
         }
 
         Battleground* bg = player->GetBattleground();
-        if (bg)
+        if (bg && IsReplayViewerMapAttached(player, bg, sessionIt->second))
             ApplyActorReplayView(player, replayIt->second, sessionIt->second, bg->GetStartTime(), true);
 
         if (ReplayDebugEnabled(ReplayDebugFlag::Actors))
