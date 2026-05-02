@@ -456,6 +456,45 @@ ArenaReplay.CloneScene.CameraAnchorEntry = 18793
 ArenaReplay.CloneScene.SyncMs = 50
 
 ########################################
+# ArenaReplay Private Replay Sandbox
+########################################
+#
+#    ArenaReplay.Sandbox.PrivatePhaseMinBit
+#        Description: Lowest phase bit that can be allocated to a replay viewer
+#                     during clone-scene playback. Replay playback does not
+#                     create or register a live BattlegroundMgr match. Instead,
+#                     the viewer is teleported directly to the recorded map and
+#                     placed into a private phase so multiple replay viewers do
+#                     not see each other or each other's clone scenes.
+#
+#                     Bit 0 is the normal world phase and should stay reserved.
+#                     Keep this at 1 unless your realm already uses phase bit 1
+#                     for another always-on custom system.
+#
+#        Default:     1
+#
+#        Example:     ArenaReplay.Sandbox.PrivatePhaseMinBit = 1
+#                     Uses phase mask 2 as the first replay-private phase.
+#
+#    ArenaReplay.Sandbox.PrivatePhaseMaxBit
+#        Description: Highest phase bit that can be allocated to replay viewers.
+#                     The replay system scans the configured bit range and gives
+#                     each active viewer a currently unused single-bit phase
+#                     mask. If every configured bit is already in use, the replay
+#                     start is rejected rather than risking two private replays
+#                     sharing one scene.
+#
+#        Default:     30
+#
+#        Example:     ArenaReplay.Sandbox.PrivatePhaseMaxBit = 30
+#                     Allows up to 30 concurrent private replay viewers when
+#                     paired with PrivatePhaseMinBit = 1.
+#
+
+ArenaReplay.Sandbox.PrivatePhaseMinBit = 1
+ArenaReplay.Sandbox.PrivatePhaseMaxBit = 30
+
+########################################
 # ArenaReplay Spectator Restrictions
 ########################################
 #

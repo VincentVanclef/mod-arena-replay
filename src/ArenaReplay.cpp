@@ -6,7 +6,6 @@
 #include "ArenaTeamMgr.h"
 #include "Base32.h"
 #include "Battleground.h"
-#include "BattlegroundMgr.h"
 #include "CharacterDatabase.h"
 #include "Chat.h"
 #include "Config.h"
@@ -159,6 +158,9 @@ struct ActiveReplaySession
     uint64 traceId = 0;
     uint32 battlegroundInstanceId = 0;
     uint32 priorBattlegroundInstanceId = 0;
+    uint32 priorPhaseMask = 1;
+    uint32 replayPhaseMask = 0;
+    bool replayPhaseApplied = false;
     uint32 replayId = 0;
     uint32 anchorMapId = 0;
     Position anchorPosition;
@@ -239,7 +241,9 @@ namespace
     static void ClearReplayViewpoint(Player* viewer, ActiveReplaySession& session);
     static bool IsReplayViewerMapAttached(Player* viewer, Battleground* bg, ActiveReplaySession const& session);
     static bool GetReplayBootstrapFrame(MatchRecord const& match, ActorFrame& frame, uint64& actorGuid, bool& winnerSide);
-    static Battleground* CreateReplaySandboxBattleground(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
+    static uint32 AllocateReplayPrivatePhaseMask(uint64 viewerKey);
+    static bool PrepareReplayMapSandbox(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
+    static void RestoreReplayViewerPhase(Player* player, ActiveReplaySession const& session);
     static uint32 GetReplayNowMs();
     static void ProcessReplaySandboxSessions(uint32 diff);
 
@@ -330,15 +334,28 @@ namespace
         if (session.teardownInProgress)
             return fail("teardown_in_progress");
 
+        if (loadedReplays.find(player->GetGUID().GetCounter()) == loadedReplays.end())
+            return fail("replay_not_loaded");
+
+        if (session.battlegroundInstanceId == 0)
+        {
+            if (session.replayMapId != 0 && player->GetMapId() != session.replayMapId)
+                return fail("not_on_replay_map");
+
+            if (session.replayPhaseMask != 0 && player->GetPhaseMask() != session.replayPhaseMask)
+                return fail("phase_mismatch");
+
+            if (reason)
+                *reason = "allowed";
+            return true;
+        }
+
         Battleground* bg = player->GetBattleground();
         if (!bg)
             return fail("no_battleground");
 
         if (!bg->isArena())
             return fail("not_arena");
-
-        if (session.battlegroundInstanceId == 0)
-            return fail("session_bg_zero");
 
         if (bg->GetInstanceID() != session.battlegroundInstanceId)
             return fail("session_bg_mismatch");
@@ -349,9 +366,6 @@ namespace
 
         if (replayIt->second != player->GetGUID().GetCounter())
             return fail("replay_owner_mismatch");
-
-        if (loadedReplays.find(player->GetGUID().GetCounter()) == loadedReplays.end())
-            return fail("replay_not_loaded");
 
         if (reason)
             *reason = "allowed";
@@ -693,7 +707,9 @@ namespace
                 std::ostringstream ss;
                 ss << "msg=" << body << " allowed=0 reason=" << reason
                    << " playerBg=" << (bg ? bg->GetInstanceID() : 0)
-                   << " sessionBg=" << (session ? session->battlegroundInstanceId : 0);
+                   << " sessionBg=" << (session ? session->battlegroundInstanceId : 0)
+                   << " playerPhase=" << player->GetPhaseMask()
+                   << " replayPhase=" << (session ? session->replayPhaseMask : 0);
                 ReplayLog(ReplayDebugFlag::Hud, session, player, "HUD", ss.str());
             }
             return;
@@ -1070,23 +1086,67 @@ namespace
         return consider(match.winnerActorTracks, true) || consider(match.loserActorTracks, false);
     }
 
-    static Battleground* CreateReplaySandboxBattleground(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
+    static uint32 GetReplayPrivatePhaseMinBit()
     {
-        if (!viewer)
-            return nullptr;
+        return std::min<uint32>(30u, std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.Sandbox.PrivatePhaseMinBit", 1u)));
+    }
 
-        PvPDifficultyEntry const* bracketEntry = GetBattlegroundBracketByLevel(match.mapId, viewer->GetLevel());
-        if (!bracketEntry)
-            return nullptr;
+    static uint32 GetReplayPrivatePhaseMaxBit()
+    {
+        uint32 minBit = GetReplayPrivatePhaseMinBit();
+        uint32 maxBit = std::min<uint32>(30u, std::max<uint32>(minBit, sConfigMgr->GetOption<uint32>("ArenaReplay.Sandbox.PrivatePhaseMaxBit", 30u)));
+        return maxBit;
+    }
 
-        Battleground* replayBg = sBattlegroundMgr->CreateNewBattleground(match.typeId, bracketEntry, match.arenaTypeId, false);
-        if (!replayBg)
-            return nullptr;
+    static uint32 AllocateReplayPrivatePhaseMask(uint64 viewerKey)
+    {
+        std::unordered_set<uint32> usedPhaseMasks;
+        for (auto const& pair : activeReplaySessions)
+        {
+            if (pair.first == viewerKey)
+                continue;
 
-        session.battlegroundInstanceId = replayBg->GetInstanceID();
-        session.replayMapId = replayBg->GetMapId();
-        bgReplayIds[replayBg->GetInstanceID()] = viewer->GetGUID().GetCounter();
-        return replayBg;
+            if (pair.second.replayPhaseMask != 0)
+                usedPhaseMasks.insert(pair.second.replayPhaseMask);
+        }
+
+        uint32 minBit = GetReplayPrivatePhaseMinBit();
+        uint32 maxBit = GetReplayPrivatePhaseMaxBit();
+        for (uint32 bit = minBit; bit <= maxBit; ++bit)
+        {
+            uint32 mask = (1u << bit);
+            if (usedPhaseMasks.find(mask) == usedPhaseMasks.end())
+                return mask;
+        }
+
+        return 0;
+    }
+
+    static bool PrepareReplayMapSandbox(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
+    {
+        if (!viewer || match.mapId == 0)
+            return false;
+
+        session.battlegroundInstanceId = 0;
+        session.replayMapId = match.mapId;
+
+        if (session.replayPhaseMask == 0)
+            session.replayPhaseMask = AllocateReplayPrivatePhaseMask(viewer->GetGUID().GetCounter());
+
+        if (session.replayPhaseMask == 0)
+            return false;
+
+        viewer->SetPhaseMask(session.replayPhaseMask, true);
+        session.replayPhaseApplied = true;
+        return true;
+    }
+
+    static void RestoreReplayViewerPhase(Player* player, ActiveReplaySession const& session)
+    {
+        if (!player || !session.replayPhaseApplied)
+            return;
+
+        player->SetPhaseMask(session.priorPhaseMask ? session.priorPhaseMask : 1u, true);
     }
 
     static bool IsReplayViewerMapAttached(Player* viewer, Battleground* bg, ActiveReplaySession const& session)
@@ -1096,6 +1156,9 @@ namespace
 
         uint32 expectedMapId = bg ? bg->GetMapId() : session.replayMapId;
         if (!expectedMapId || viewer->GetMapId() != expectedMapId)
+            return false;
+
+        if (session.replayPhaseMask != 0 && viewer->GetPhaseMask() != session.replayPhaseMask)
             return false;
 
         if (bg || session.battlegroundInstanceId != 0)
@@ -1311,10 +1374,11 @@ namespace
         if (!viewer)
             return nullptr;
 
-        Creature* unit = viewer->SummonCreature(entry, x, y, z, o, TEMPSUMMON_MANUAL_DESPAWN, 0);
+        Creature* unit = viewer->SummonCreature(entry, x, y, z, o, TEMPSUMMON_MANUAL_DESPAWN, 0, nullptr, true);
         if (!unit)
             return nullptr;
 
+        unit->SetPhaseMask(viewer->GetPhaseMask(), true);
         unit->SetReactState(REACT_PASSIVE);
         unit->SetFaction(35);
         unit->SetCanFly(true);
@@ -1535,6 +1599,8 @@ namespace
                    << " playerMap=" << player->GetMapId()
                    << " playerBg=" << player->GetBattlegroundId()
                    << " sessionBg=" << session.battlegroundInstanceId
+                   << " playerPhase=" << player->GetPhaseMask()
+                   << " replayPhase=" << session.replayPhaseMask
                    << " replayBgEnded=" << (session.replayBgEnded ? 1 : 0)
                    << " anchorMap=" << session.anchorMapId;
                 ReplayLog(ReplayDebugFlag::Teardown, &session, player, "EXIT_REQUEST", ss.str());
@@ -1574,6 +1640,8 @@ namespace
                << " playerMap=" << player->GetMapId()
                << " playerBg=" << player->GetBattlegroundId()
                << " sessionBg=" << session.battlegroundInstanceId
+               << " playerPhase=" << player->GetPhaseMask()
+               << " replayPhase=" << session.replayPhaseMask
                << " replayBgEnded=" << (session.replayBgEnded ? 1 : 0);
             ReplayLog(ReplayDebugFlag::Teardown, &session, player, "EXIT_BEGIN", ss.str());
         }
@@ -1586,6 +1654,7 @@ namespace
         }
 
         RestoreReplayViewerState(player, session);
+        RestoreReplayViewerPhase(player, session);
         loadedReplays.erase(viewerKey);
 
         std::string action = "return_to_anchor";
@@ -1608,7 +1677,8 @@ namespace
             ss << "reason=" << session.lastTeardownReason
                << " action=" << action
                << " map=" << player->GetMapId()
-               << " playerBg=" << player->GetBattlegroundId();
+               << " playerBg=" << player->GetBattlegroundId()
+               << " playerPhase=" << player->GetPhaseMask();
             ReplayLog(ReplayDebugFlag::Teardown, &session, player, "EXIT_PATH", ss.str());
         }
 
@@ -1622,6 +1692,7 @@ namespace
                << " z=" << player->GetPositionZ()
                << " o=" << player->GetOrientation()
                << " inBg=" << (player->GetBattleground() ? 1 : 0)
+               << " playerPhase=" << player->GetPhaseMask()
                << " hidden=" << (player->IsVisible() ? 0 : 1)
                << " canFly=" << (player->CanFly() ? 1 : 0);
             ReplayLog(ReplayDebugFlag::Return, &session, player, "RETURN_STATE", ss.str());
@@ -1641,6 +1712,7 @@ namespace
             ResetActorReplayView(player, it->second);
             DespawnReplayActorClones(player, it->second);
             RestoreReplayViewerState(player, it->second);
+            RestoreReplayViewerPhase(player, it->second);
         }
         else
         {
@@ -1829,7 +1901,10 @@ namespace
         ActiveReplaySession& session = activeReplaySessions[player->GetGUID().GetCounter()];
         session.traceId = NextReplayTraceId();
         session.priorBattlegroundInstanceId = player->GetBattlegroundId();
+        session.priorPhaseMask = player->GetPhaseMask();
         session.battlegroundInstanceId = replayBgInstanceId;
+        session.replayPhaseMask = 0;
+        session.replayPhaseApplied = false;
         session.replayId = replayId;
         session.anchorMapId = player->GetMapId();
         session.anchorPosition.Relocate(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), player->GetOrientation());
@@ -1890,6 +1965,8 @@ namespace
             std::ostringstream ss;
             ss << "priorBg=" << session.priorBattlegroundInstanceId
                << " replayBg=" << session.battlegroundInstanceId
+               << " priorPhase=" << session.priorPhaseMask
+               << " replayPhase=" << session.replayPhaseMask
                << " anchorMap=" << session.anchorMapId
                << " anchorX=" << session.anchorPosition.GetPositionX()
                << " anchorY=" << session.anchorPosition.GetPositionY()
@@ -2053,6 +2130,8 @@ public:
                        << " replayMap=" << bg->GetMapId()
                        << " playerBg=" << replayer->GetBattlegroundId()
                        << " sessionBg=" << session.battlegroundInstanceId
+                       << " playerPhase=" << replayer->GetPhaseMask()
+                       << " replayPhase=" << session.replayPhaseMask
                        << " hasBg=" << (replayer->GetBattleground() ? 1 : 0)
                        << " isBgMap=" << ((replayer->GetMap() && replayer->GetMap()->IsBattlegroundOrArena()) ? 1 : 0)
                        << " nowMs=" << bg->GetStartTime()
@@ -3118,22 +3197,22 @@ private:
 
         LockReplayViewerControl(player, replayId, 0);
         ActiveReplaySession& replaySession = activeReplaySessions[player->GetGUID().GetCounter()];
-        Battleground* replayShell = CreateReplaySandboxBattleground(player, record, replaySession);
-        if (!replayShell)
+        if (!PrepareReplayMapSandbox(player, record, replaySession))
         {
             RestoreReplayViewerState(player, replaySession);
+            RestoreReplayViewerPhase(player, replaySession);
             activeReplaySessions.erase(player->GetGUID().GetCounter());
             loadedReplays.erase(player->GetGUID().GetCounter());
-            handler.PSendSysMessage("Replay sandbox could not create a fresh arena instance shell.");
+            handler.PSendSysMessage("Replay sandbox could not allocate a private viewer phase or target replay map.");
             return false;
         }
 
-        replaySession.teardownPreferBattlegroundLeave = ShouldPreferBattlegroundLeave(replaySession);
+        replaySession.teardownPreferBattlegroundLeave = false;
         replaySession.viewerWasParticipant = viewerWasParticipant;
         replaySession.actorSpectateOnWinnerTeam = sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnWinnerTeam", true);
         replaySession.actorTrackIndex = 0;
         replaySession.nextActorTeleportMs = 0;
-        replaySession.replayMapId = replayShell->GetMapId();
+        replaySession.replayMapId = record.mapId;
         replaySession.replaySpawnPosition.Relocate(bootstrapFrame.x, bootstrapFrame.y, bootstrapFrame.z + 2.0f, bootstrapFrame.o);
         replaySession.sandboxTeleportIssued = true;
         replaySession.awaitingReplayMapAttach = true;
@@ -3175,8 +3254,11 @@ private:
             }
         }
 
-        player->SetEntryPoint();
-        sBattlegroundMgr->SendToBattleground(player, replaySession.battlegroundInstanceId, record.typeId);
+        player->TeleportTo(replaySession.replayMapId,
+            replaySession.replaySpawnPosition.GetPositionX(),
+            replaySession.replaySpawnPosition.GetPositionY(),
+            replaySession.replaySpawnPosition.GetPositionZ(),
+            replaySession.replaySpawnPosition.GetOrientation());
 
         if (ReplayDebugEnabled(ReplayDebugFlag::General))
         {
@@ -3184,6 +3266,8 @@ private:
             ss << "viewerWasParticipant=" << (viewerWasParticipant ? 1 : 0)
                << " replayBg=" << replaySession.battlegroundInstanceId
                << " replayMap=" << replaySession.replayMapId
+               << " replayPhase=" << replaySession.replayPhaseMask
+               << " playerPhase=" << player->GetPhaseMask()
                << " spawnX=" << replaySession.replaySpawnPosition.GetPositionX()
                << " spawnY=" << replaySession.replaySpawnPosition.GetPositionY()
                << " spawnZ=" << replaySession.replaySpawnPosition.GetPositionZ()
@@ -3362,6 +3446,8 @@ namespace
                            << " replayMap=" << session.replayMapId
                            << " playerBg=" << replayer->GetBattlegroundId()
                            << " sessionBg=" << session.battlegroundInstanceId
+                           << " playerPhase=" << replayer->GetPhaseMask()
+                           << " replayPhase=" << session.replayPhaseMask
                            << " hasBg=" << (replayer->GetBattleground() ? 1 : 0)
                            << " isBgMap=" << ((replayer->GetMap() && replayer->GetMap()->IsBattlegroundOrArena()) ? 1 : 0)
                            << " nowMs=" << nowMs
@@ -3378,6 +3464,8 @@ namespace
                                << " replayMap=" << session.replayMapId
                                << " playerBg=" << replayer->GetBattlegroundId()
                                << " sessionBg=" << session.battlegroundInstanceId
+                               << " playerPhase=" << replayer->GetPhaseMask()
+                               << " replayPhase=" << session.replayPhaseMask
                                << " nowMs=" << nowMs;
                             ReplayLog(ReplayDebugFlag::Teardown, &session, replayer, "ATTACH_TIMEOUT", ss.str());
                         }
@@ -3402,6 +3490,8 @@ namespace
                        << " replayMap=" << session.replayMapId
                        << " playerBg=" << replayer->GetBattlegroundId()
                        << " sessionBg=" << session.battlegroundInstanceId
+                       << " playerPhase=" << replayer->GetPhaseMask()
+                       << " replayPhase=" << session.replayPhaseMask
                        << " hasBg=" << (replayer->GetBattleground() ? 1 : 0)
                        << " isBgMap=" << ((replayer->GetMap() && replayer->GetMap()->IsBattlegroundOrArena()) ? 1 : 0)
                        << " nowMs=" << nowMs;
@@ -3658,6 +3748,8 @@ public:
         Battleground* bg = player->GetBattleground();
         if (bg && IsReplayViewerMapAttached(player, bg, sessionIt->second))
             ApplyActorReplayView(player, replayIt->second, sessionIt->second, bg->GetStartTime(), true);
+        else if (IsReplayViewerMapAttached(player, nullptr, sessionIt->second))
+            ApplyActorReplayView(player, replayIt->second, sessionIt->second, sessionIt->second.replayPlaybackMs, true);
 
         if (ReplayDebugEnabled(ReplayDebugFlag::Actors))
         {
@@ -3673,7 +3765,7 @@ public:
 
         SendReplayHudPov(player, replayIt->second, sessionIt->second, true);
         sessionIt->second.nextHudWatcherSyncMs = 0;
-        SendReplayHudWatchers(player->GetBattleground(), player, replayIt->second, sessionIt->second, true);
+        SendReplayHudWatchers(bg, player, replayIt->second, sessionIt->second, true);
         return true;
     }
 };
