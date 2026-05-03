@@ -15,6 +15,7 @@
 #include "Item.h"
 #include "Map.h"
 #include "Opcodes.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerGossip.h"
 #include "PlayerGossipMgr.h"
@@ -157,6 +158,7 @@ struct ReplayCloneBinding
 };
 enum ReplayDynamicObjectRole
 {
+    RTG_REPLAY_OBJECT_STRUCTURAL,
     RTG_REPLAY_OBJECT_GATE,
     RTG_REPLAY_OBJECT_BUFF,
     RTG_REPLAY_OBJECT_DS_WATER_COLLISION,
@@ -227,6 +229,10 @@ struct ActiveReplaySession
     std::vector<ReplayCloneBinding> cloneBindings;
     ObjectGuid cameraAnchorGuid;
     bool viewpointBound = false;
+    bool cameraAnchorFailed = false;
+    bool cameraAnchorFailureLogged = false;
+    uint32 nextCameraAnchorRetryMs = 0;
+    bool fixedCameraFallbackApplied = false;
     bool spectatorShellActive = false;
     uint32 nativeMapId = 0;
     uint32 replayMapId = 0;
@@ -238,9 +244,9 @@ struct ActiveReplaySession
     uint32 nextAttachLogMs = 0;
     uint32 replayPlaybackMs = 0;
     uint32 replayLastServerMs = 0;
-    std::vector<ReplayDynamicObjectBinding> dynamicObjects;
-    bool dynamicObjectsSpawned = false;
-    bool dynamicObjectsInitialized = false;
+    std::vector<ReplayDynamicObjectBinding> replayObjects;
+    bool replayObjectsSpawned = false;
+    bool replayObjectsInitialized = false;
     uint32 nextDynamicObjectLogMs = 0;
     uint32 rvState = 0;
     uint32 rvNextEventMs = 0;
@@ -1448,6 +1454,171 @@ namespace
         return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.CameraAnchorEntry", 98502u);
     }
 
+    static bool ReplayCameraAnchorRequired()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.RequireCameraAnchor", false);
+    }
+
+    static bool ReplayCameraAnchorFailLogOnce()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.CameraAnchorFailLogOnce", true);
+    }
+
+    static uint32 ReplayCameraAnchorRetryMs()
+    {
+        return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.CameraAnchorRetryMs", 5000u);
+    }
+
+    static uint32 ReplayCameraFallbackMode()
+    {
+        return std::min<uint32>(2u, sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.FallbackMode", 1u));
+    }
+
+    static bool ReplayBodyChaseFallbackDisabled()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.DisableBodyChaseFallback", true);
+    }
+
+    static char const* ReplayCameraFallbackModeName(uint32 mode)
+    {
+        switch (mode)
+        {
+            case 0:
+                return "legacy_body_chase";
+            case 1:
+                return "fixed_overview";
+            case 2:
+                return "cancel";
+            default:
+                return "unknown";
+        }
+    }
+
+    static bool GetReplayFixedCameraFallbackPosition(ActiveReplaySession const& session, float& x, float& y, float& z, float& o)
+    {
+        char const* arenaKey = nullptr;
+        switch (session.replayMapId)
+        {
+            case 725:
+                arenaKey = "Nagrand";
+                x = 4055.0f;
+                y = 2920.0f;
+                z = 20.0f;
+                o = 0.0f;
+                break;
+            case 726:
+                arenaKey = "BladesEdge";
+                x = 6240.0f;
+                y = 260.0f;
+                z = 12.0f;
+                o = 0.0f;
+                break;
+            case 727:
+                arenaKey = "RuinsOfLordaeron";
+                x = 1287.0f;
+                y = 1666.0f;
+                z = 38.0f;
+                o = 0.0f;
+                break;
+            case 728:
+                arenaKey = "DalaranSewers";
+                x = 1291.0f;
+                y = 791.0f;
+                z = 24.0f;
+                o = 0.0f;
+                break;
+            case 729:
+                arenaKey = "RingOfValor";
+                x = 763.0f;
+                y = -284.0f;
+                z = 35.0f;
+                o = 0.0f;
+                break;
+            default:
+                return false;
+        }
+
+        std::string base = std::string("ArenaReplay.CloneScene.Fallback.") + arenaKey;
+        x = sConfigMgr->GetOption<float>(base + ".X", x);
+        y = sConfigMgr->GetOption<float>(base + ".Y", y);
+        z = sConfigMgr->GetOption<float>(base + ".Z", z);
+        o = sConfigMgr->GetOption<float>(base + ".O", o);
+        return true;
+    }
+
+    static bool ApplyReplayFixedCameraFallback(Player* viewer, ActiveReplaySession& session, char const* reason)
+    {
+        if (!viewer)
+            return false;
+
+        float x = 0.0f;
+        float y = 0.0f;
+        float z = 0.0f;
+        float o = 0.0f;
+        if (!GetReplayFixedCameraFallbackPosition(session, x, y, z, o))
+        {
+            LOG_ERROR("server.loading", "[RTG][REPLAY][CAMERA_FALLBACK] replay={} viewerGuid={} nativeMap={} replayMap={} mode={} x=0 y=0 z=0 o=0 reason={} result=no_position",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                session.nativeMapId,
+                session.replayMapId,
+                ReplayCameraFallbackModeName(ReplayCameraFallbackMode()),
+                reason ? reason : "unknown");
+            return false;
+        }
+
+        viewer->SetCanFly(true);
+        viewer->SetDisableGravity(true);
+        viewer->SetHover(true);
+        viewer->StopMoving();
+        viewer->SetClientControl(viewer, false);
+        session.movementLocked = true;
+        if (!session.viewerHidden || viewer->IsVisible())
+        {
+            viewer->SetVisible(false);
+            session.viewerHidden = true;
+        }
+
+        bool moved = !session.fixedCameraFallbackApplied ||
+            std::abs(viewer->GetPositionX() - x) > 0.5f ||
+            std::abs(viewer->GetPositionY() - y) > 0.5f ||
+            std::abs(viewer->GetPositionZ() - z) > 0.5f;
+        if (moved)
+            viewer->NearTeleportTo(x, y, z, o);
+        else
+            viewer->SetFacingTo(o);
+
+        if (!session.fixedCameraFallbackApplied || ReplayDynamicObjectsDebugEnabled())
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][CAMERA_FALLBACK] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} mode={} x={} y={} z={} o={} reason={} result=ok",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                session.nativeMapId,
+                session.replayMapId,
+                session.replayPhaseMask,
+                ReplayCameraFallbackModeName(ReplayCameraFallbackMode()),
+                x,
+                y,
+                z,
+                o,
+                reason ? reason : "unknown");
+        }
+
+        session.fixedCameraFallbackApplied = true;
+        session.lastCameraX = x;
+        session.lastCameraY = y;
+        session.lastCameraZ = z;
+        session.lastCameraO = o;
+        session.actorSpectateActive = true;
+        session.replayMovementStabilized = true;
+        return true;
+    }
+
+    static bool ShouldCancelReplayForCameraAnchor(ActiveReplaySession const& session)
+    {
+        return session.cameraAnchorFailed && (ReplayCameraAnchorRequired() || ReplayCameraFallbackMode() == 2);
+    }
+
     static Creature* SummonReplaySceneUnit(Player* viewer, uint32 entry, float x, float y, float z, float o, bool hideNameplate = false)
     {
         if (!viewer)
@@ -1463,7 +1634,8 @@ namespace
         unit->SetCanFly(true);
         unit->SetDisableGravity(true);
         unit->SetHover(true);
-        unit->SetUInt32Value(UNIT_FIELD_FLAGS, unit->GetUInt32Value(UNIT_FIELD_FLAGS) | UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_PACIFIED);
+        unit->StopMoving();
+        unit->SetUInt32Value(UNIT_FIELD_FLAGS, unit->GetUInt32Value(UNIT_FIELD_FLAGS) | UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_PACIFIED);
         if (hideNameplate)
             unit->SetVisible(false);
         return unit;
@@ -1476,6 +1648,36 @@ namespace
 
         if (Creature* existing = FindReplayCameraAnchor(viewer, session))
             return existing;
+
+        uint32 nowMs = GetReplayNowMs();
+        if (session.cameraAnchorFailed)
+        {
+            if (session.nextCameraAnchorRetryMs == 0 && ReplayCameraAnchorFailLogOnce())
+                return nullptr;
+
+            if (session.nextCameraAnchorRetryMs != 0 && nowMs < session.nextCameraAnchorRetryMs)
+                return nullptr;
+        }
+
+        uint32 cameraEntry = GetReplayCameraAnchorEntry();
+        if (!sObjectMgr->GetCreatureTemplate(cameraEntry))
+        {
+            if (!session.cameraAnchorFailureLogged || !ReplayCameraAnchorFailLogOnce())
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][CAMERA_ANCHOR_TEMPLATE_MISSING] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} entry={} result=missing_template",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    session.replayPhaseMask,
+                    cameraEntry);
+            }
+
+            session.cameraAnchorFailed = true;
+            session.cameraAnchorFailureLogged = true;
+            session.nextCameraAnchorRetryMs = 0;
+            return nullptr;
+        }
 
         float x = viewer->GetPositionX();
         float y = viewer->GetPositionY();
@@ -1496,24 +1698,35 @@ namespace
             }
         }
 
-        Creature* anchor = SummonReplaySceneUnit(viewer, GetReplayCameraAnchorEntry(), x, y, z, o, true);
+        Creature* anchor = SummonReplaySceneUnit(viewer, cameraEntry, x, y, z, o, true);
         if (!anchor)
         {
-            LOG_ERROR("server.loading", "[RTG][REPLAY][CAMERA_ANCHOR_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} entry={} x={} y={} z={} o={} result=summon_failed",
-                session.replayId,
-                viewer->GetGUID().GetCounter(),
-                session.nativeMapId,
-                session.replayMapId,
-                session.replayPhaseMask,
-                GetReplayCameraAnchorEntry(),
-                x,
-                y,
-                z,
-                o);
+            if (!session.cameraAnchorFailureLogged || !ReplayCameraAnchorFailLogOnce())
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][CAMERA_ANCHOR_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} entry={} x={} y={} z={} o={} result=summon_failed",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    session.replayPhaseMask,
+                    cameraEntry,
+                    x,
+                    y,
+                    z,
+                    o);
+            }
+
+            session.cameraAnchorFailed = true;
+            session.cameraAnchorFailureLogged = true;
+            uint32 retryMs = ReplayCameraAnchorRetryMs();
+            session.nextCameraAnchorRetryMs = retryMs ? nowMs + retryMs : 0;
             return nullptr;
         }
 
         session.cameraAnchorGuid = anchor->GetGUID();
+        session.cameraAnchorFailed = false;
+        session.cameraAnchorFailureLogged = false;
+        session.nextCameraAnchorRetryMs = 0;
         return anchor;
     }
 
@@ -1560,20 +1773,50 @@ namespace
     {
         ClearReplayViewpoint(viewer, session);
 
+        uint32 clonesCleaned = 0;
+        uint64 anchorGuid = session.cameraAnchorGuid ? session.cameraAnchorGuid.GetCounter() : 0;
+        char const* anchorResult = session.cameraAnchorGuid ? "missing" : "none";
         if (viewer && viewer->GetMap())
         {
             if (Creature* anchor = FindReplayCameraAnchor(viewer, session))
+            {
                 anchor->DespawnOrUnsummon(Milliseconds(0));
+                anchorResult = "ok";
+            }
 
             for (ReplayCloneBinding const& binding : session.cloneBindings)
                 if (Creature* clone = viewer->GetMap()->GetCreature(binding.cloneGuid))
+                {
                     clone->DespawnOrUnsummon(Milliseconds(0));
+                    ++clonesCleaned;
+                }
         }
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][CAMERA_ANCHOR_CLEANUP] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} anchorGuid={} result={}",
+            session.replayId,
+            viewer ? viewer->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            session.replayPhaseMask,
+            anchorGuid,
+            anchorResult);
+        LOG_INFO("server.loading", "[RTG][REPLAY][CLONE_CLEANUP] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} clones={} cleaned={} result=ok",
+            session.replayId,
+            viewer ? viewer->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            session.replayPhaseMask,
+            session.cloneBindings.size(),
+            clonesCleaned);
 
         session.cameraAnchorGuid.Clear();
         session.cloneBindings.clear();
         session.cloneSceneBuilt = false;
         session.nextCloneSyncMs = 0;
+        session.cameraAnchorFailed = false;
+        session.cameraAnchorFailureLogged = false;
+        session.nextCameraAnchorRetryMs = 0;
+        session.fixedCameraFallbackApplied = false;
     }
 
     static bool BuildReplayActorCloneScene(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
@@ -1586,6 +1829,59 @@ namespace
 
         if (session.cloneSceneBuilt)
             return !session.cloneBindings.empty();
+
+        uint32 totalActors = uint32(match.winnerActorTracks.size() + match.loserActorTracks.size());
+        uint32 playableActors = 0;
+        uint32 excludedNoFrames = 0;
+        uint32 excludedNoAppearance = 0;
+        uint32 missingAppearanceFallback = 0;
+        uint32 team0Count = 0;
+        uint32 team1Count = 0;
+        std::unordered_set<uint64> seenClassifyGuids;
+
+        auto classifyTracks = [&](std::vector<ActorTrack> const& tracks, bool winnerSide)
+        {
+            for (ActorTrack const& track : tracks)
+            {
+                bool hasFrames = IsReplayActorTrackPlayable(track);
+                bool hasAppearance = FindReplayActorAppearanceSnapshot(match, track.guid) != nullptr;
+                char const* excludedReason = "none";
+                if (!hasFrames)
+                {
+                    excludedReason = "no_frames";
+                    ++excludedNoFrames;
+                }
+                else if (seenClassifyGuids.find(track.guid) != seenClassifyGuids.end())
+                    excludedReason = "duplicate_guid";
+                else
+                {
+                    ++playableActors;
+                    if (winnerSide)
+                        ++team0Count;
+                    else
+                        ++team1Count;
+                    if (!hasAppearance)
+                        ++missingAppearanceFallback;
+                    seenClassifyGuids.insert(track.guid);
+                }
+
+                LOG_INFO("server.loading", "[RTG][REPLAY][ACTOR_CLASSIFY] replay={} viewerGuid={} nativeMap={} replayMap={} actorGuid={} actorName={} team={} class={} hasFrames={} hasAppearance={} excludedReason={}",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    track.guid,
+                    track.name,
+                    winnerSide ? "winner" : "loser",
+                    GetClassToken(track.playerClass),
+                    hasFrames ? 1 : 0,
+                    hasAppearance ? 1 : 0,
+                    excludedReason);
+            }
+        };
+
+        classifyTracks(match.winnerActorTracks, true);
+        classifyTracks(match.loserActorTracks, false);
 
         std::vector<ReplayActorSelectionRef> playable = BuildPlayableReplayActorSelections(match);
         for (ReplayActorSelectionRef const& ref : playable)
@@ -1603,11 +1899,39 @@ namespace
             if (!clone)
                 continue;
 
-            ApplyReplayActorAppearanceToClone(clone, FindReplayActorAppearanceSnapshot(match, track.guid));
+            ReplayActorAppearanceSnapshot const* snapshot = FindReplayActorAppearanceSnapshot(match, track.guid);
+            if (!snapshot)
+            {
+                LOG_WARN("server.loading", "[RTG][REPLAY][ACTOR_CLASSIFY] replay={} viewerGuid={} nativeMap={} replayMap={} actorGuid={} actorName={} team={} class={} hasFrames=1 hasAppearance=0 excludedReason=missingAppearanceFallback",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    track.guid,
+                    track.name,
+                    ref.winnerSide ? "winner" : "loser",
+                    GetClassToken(track.playerClass));
+            }
+            ApplyReplayActorAppearanceToClone(clone, snapshot);
             session.cloneBindings.push_back({ track.guid, ref.winnerSide, clone->GetGUID() });
         }
 
         session.cloneSceneBuilt = true;
+        LOG_INFO("server.loading", "[RTG][REPLAY][CLONE_SCENE] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} totalActors={} playableActors={} clonedActors={} excludedNoFrames={} excludedNoAppearance={} missingAppearanceFallback={} team0Count={} team1Count={} result={}",
+            session.replayId,
+            viewer->GetGUID().GetCounter(),
+            session.nativeMapId,
+            session.replayMapId,
+            session.replayPhaseMask,
+            totalActors,
+            playableActors,
+            session.cloneBindings.size(),
+            excludedNoFrames,
+            excludedNoAppearance,
+            missingAppearanceFallback,
+            team0Count,
+            team1Count,
+            session.cloneBindings.empty() ? "fail" : "ok");
         return !session.cloneBindings.empty();
     }
 
@@ -1661,11 +1985,15 @@ namespace
 
     static ReplayDynamicObjectTemplate const ReplayDynamicObjectTemplates[] =
     {
+        {559, 725, 183977, 4023.709f, 2981.777f, 10.70117f, -2.648788f, 0.0f, 0.0f, 0.9697962f, -0.2439165f, RTG_REPLAY_OBJECT_STRUCTURAL, true, false},
+        {559, 725, 183979, 4090.064f, 2858.438f, 10.23631f, 0.4928045f, 0.0f, 0.0f, 0.2439165f, 0.9697962f, RTG_REPLAY_OBJECT_STRUCTURAL, true, false},
         {559, 725, 183978, 4031.854f, 2966.833f, 12.0462f, -2.648788f, 0.0f, 0.0f, 0.9697962f, -0.2439165f, RTG_REPLAY_OBJECT_GATE, true, false},
         {559, 725, 183980, 4081.179f, 2874.970f, 12.00171f, 0.4928045f, 0.0f, 0.0f, 0.2439165f, 0.9697962f, RTG_REPLAY_OBJECT_GATE, true, false},
         {559, 725, 184663, 4009.189941f, 2895.250000f, 13.052700f, -1.448624f, 0.0f, 0.0f, 0.6626201f, -0.7489557f, RTG_REPLAY_OBJECT_BUFF, false, false},
         {559, 725, 184664, 4103.330078f, 2946.350098f, 13.051300f, -0.06981307f, 0.0f, 0.0f, 0.03489945f, -0.9993908f, RTG_REPLAY_OBJECT_BUFF, false, false},
 
+        {562, 726, 183970, 6299.116f, 296.5494f, 3.308032f, 0.8813917f, 0.0f, 0.0f, 0.4265689f, 0.9044551f, RTG_REPLAY_OBJECT_STRUCTURAL, true, false},
+        {562, 726, 183972, 6177.708f, 227.3481f, 3.604374f, -2.260201f, 0.0f, 0.0f, 0.9044551f, -0.4265689f, RTG_REPLAY_OBJECT_STRUCTURAL, true, false},
         {562, 726, 183971, 6287.277f, 282.1877f, 3.810925f, -2.260201f, 0.0f, 0.0f, 0.9044551f, -0.4265689f, RTG_REPLAY_OBJECT_GATE, true, false},
         {562, 726, 183973, 6189.546f, 241.7099f, 3.101481f, 0.8813917f, 0.0f, 0.0f, 0.4265689f, 0.9044551f, RTG_REPLAY_OBJECT_GATE, true, false},
         {562, 726, 184663, 6249.042f, 275.3239f, 11.22033f, -1.448624f, 0.0f, 0.0f, 0.6626201f, -0.7489557f, RTG_REPLAY_OBJECT_BUFF, false, false},
@@ -1703,12 +2031,12 @@ namespace
 
     static bool ReplayDynamicObjectsEnabled()
     {
-        return sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.Enable", true);
+        return sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Enable", true);
     }
 
     static bool ReplayDynamicObjectsDebugEnabled()
     {
-        return sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.Debug", true);
+        return sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Debug", false);
     }
 
     static uint32 SecondsToMs(uint32 seconds)
@@ -1753,6 +2081,8 @@ namespace
     {
         switch (role)
         {
+            case RTG_REPLAY_OBJECT_STRUCTURAL:
+                return "STRUCTURAL";
             case RTG_REPLAY_OBJECT_GATE:
                 return "GATE";
             case RTG_REPLAY_OBJECT_BUFF:
@@ -1782,6 +2112,8 @@ namespace
     {
         switch (role)
         {
+            case RTG_REPLAY_OBJECT_STRUCTURAL:
+                return active ? "active" : "ready";
             case RTG_REPLAY_OBJECT_GATE:
             case RTG_REPLAY_OBJECT_RV_ELEVATOR:
             case RTG_REPLAY_OBJECT_RV_FIRE:
@@ -1807,11 +2139,19 @@ namespace
         if (def.nativeMap != session.nativeMapId)
             return false;
 
-        if ((def.role == RTG_REPLAY_OBJECT_DS_WATER_COLLISION || def.role == RTG_REPLAY_OBJECT_DS_WATER_VISUAL) &&
-            !sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.DalaranWaterfall.Enable", true))
+        if (def.role == RTG_REPLAY_OBJECT_STRUCTURAL &&
+            !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.SpawnAllArenaObjects", true))
             return false;
 
-        if (session.nativeMapId == 618 && !sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.RingOfValor.Enable", true))
+        if ((def.role == RTG_REPLAY_OBJECT_DS_WATER_COLLISION || def.role == RTG_REPLAY_OBJECT_DS_WATER_VISUAL) &&
+            !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.Enable", true))
+            return false;
+
+        if (def.role == RTG_REPLAY_OBJECT_DS_WATER_COLLISION &&
+            !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.CollisionEnable", false))
+            return false;
+
+        if (session.nativeMapId == 618 && !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Ring.Enable", true))
             return false;
 
         return true;
@@ -1820,7 +2160,13 @@ namespace
     static bool IsReplayDynamicObjectRequired(ReplayDynamicObjectTemplate const& def)
     {
         if (def.role == RTG_REPLAY_OBJECT_DS_WATER_COLLISION)
-            return sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.DalaranWaterfall.CollisionRequired", false);
+            return sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.CollisionRequired", false);
+
+        if (def.role == RTG_REPLAY_OBJECT_STRUCTURAL)
+            return sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.AbortIfRequiredStructuralObjectFails", true);
+
+        if (def.role == RTG_REPLAY_OBJECT_GATE)
+            return sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.AbortIfRequiredGateFails", true);
 
         return def.required;
     }
@@ -1836,7 +2182,9 @@ namespace
 
     static void LogReplayDynamicObjectEvent(char const* tag, ActiveReplaySession const& session, Player* viewer, ReplayDynamicObjectBinding const* binding, uint32 entry, uint32 role, char const* state, char const* result)
     {
-        if (!ReplayDynamicObjectsDebugEnabled() && (!result || std::string(result) == "ok"))
+        std::string tagName = tag ? tag : "";
+        bool okResult = result && std::string(result) == "ok";
+        if (!ReplayDynamicObjectsDebugEnabled() && okResult && tagName != "OBJECT_SPAWN" && tagName != "OBJECT_STATE" && tagName != "OBJECT_CLEANUP")
             return;
 
         uint64 objectGuid = binding && binding->guid ? binding->guid.GetCounter() : 0;
@@ -1904,7 +2252,7 @@ namespace
     static bool SetReplayDynamicObjectsByRole(Player* viewer, ActiveReplaySession& session, uint32 role, bool active, bool force = false)
     {
         bool ok = true;
-        for (ReplayDynamicObjectBinding& binding : session.dynamicObjects)
+        for (ReplayDynamicObjectBinding& binding : session.replayObjects)
         {
             if (binding.role != role || !binding.spawned || binding.cleaned)
                 continue;
@@ -1936,7 +2284,7 @@ namespace
 
     static void LogRingReplayObjectSummary(ActiveReplaySession const& session, Player* viewer)
     {
-        if (!ReplayDynamicObjectsDebugEnabled() || session.nativeMapId != 618)
+        if (session.nativeMapId != 618)
             return;
 
         uint32 elevators = 0;
@@ -1947,7 +2295,7 @@ namespace
         uint32 pulleys = 0;
         uint32 buffs = 0;
 
-        for (ReplayDynamicObjectBinding const& binding : session.dynamicObjects)
+        for (ReplayDynamicObjectBinding const& binding : session.replayObjects)
         {
             if (!binding.spawned || binding.cleaned)
                 continue;
@@ -1997,7 +2345,10 @@ namespace
 
     static void LogRingReplayState(ActiveReplaySession const& session, Player* viewer, char const* result)
     {
-        if (!ReplayDynamicObjectsDebugEnabled() || session.nativeMapId != 618)
+        if (session.nativeMapId != 618)
+            return;
+
+        if (!ReplayDynamicObjectsDebugEnabled() && (!result || std::string(result) != "initialized"))
             return;
 
         LOG_INFO("server.loading", "[RTG][REPLAY][RV_STATE] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} derivedInitialState={} firstActorZ={} rvState={} pillarToggle={} replayTimeMs={} result={}",
@@ -2019,7 +2370,7 @@ namespace
         if (!ReplayDynamicObjectsEnabled())
             return true;
 
-        if (session.dynamicObjectsSpawned)
+        if (session.replayObjectsSpawned)
             return true;
 
         if (!viewer || !viewer->GetMap() || viewer->GetMapId() != session.replayMapId)
@@ -2061,11 +2412,11 @@ namespace
             binding.active = false;
             binding.spawned = true;
             binding.cleaned = false;
-            session.dynamicObjects.push_back(binding);
-            LogReplayDynamicObjectEvent("OBJECT_SPAWN", session, viewer, &session.dynamicObjects.back(), def.entry, def.role, "spawn", "ok");
+            session.replayObjects.push_back(binding);
+            LogReplayDynamicObjectEvent("OBJECT_SPAWN", session, viewer, &session.replayObjects.back(), def.entry, def.role, "spawn", "ok");
         }
 
-        session.dynamicObjectsSpawned = true;
+        session.replayObjectsSpawned = true;
         LogRingReplayObjectSummary(session, viewer);
         return !hardFailure;
     }
@@ -2075,32 +2426,33 @@ namespace
         if (!ReplayDynamicObjectsEnabled())
             return true;
 
-        if (session.dynamicObjectsInitialized)
+        if (session.replayObjectsInitialized)
             return true;
 
-        if (!sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.SpawnBeforeClones", true) && ReplayDynamicObjectsDebugEnabled())
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.SpawnBeforeClones", true) && ReplayDynamicObjectsDebugEnabled())
             LogReplayDynamicTimeline(session, viewer, "SPAWN_ORDER", "before_clones", "forced");
 
         if (!SpawnReplayDynamicObjects(viewer, session))
             return false;
 
-        uint32 gateDelayMs = sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.GateOpenDelayMs", 0u);
-        if (gateDelayMs == 0 && !SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_GATE, true))
+        uint32 gateDelayMs = sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.GateOpenDelayMs", 0u);
+        bool startWithGatesOpen = sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.StartWithGatesOpen", true);
+        if ((startWithGatesOpen || gateDelayMs == 0) && !SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_GATE, true))
             return false;
 
-        if (session.nativeMapId == 617 && sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.DalaranWaterfall.Enable", true))
+        if (session.nativeMapId == 617 && sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.Enable", true))
         {
             session.dsWaterState = 0;
-            session.dsNextEventMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.DalaranWaterfall.FirstDelaySeconds", 45u));
+            session.dsNextEventMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds", 45u));
         }
 
-        if (session.nativeMapId == 618 && sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.RingOfValor.Enable", true))
+        if (session.nativeMapId == 618 && sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Ring.Enable", true))
         {
             float firstActorZ = 0.0f;
             bool haveFirstActorZ = GetFirstPlayableActorZ(match, firstActorZ);
             session.rvFirstActorZ = haveFirstActorZ ? firstActorZ : 0.0f;
             session.rvInitialUpper = haveFirstActorZ &&
-                sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.RingOfValor.DeriveInitialStateFromFirstActorZ", true) &&
+                sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Ring.DeriveInitialStateFromFirstActorZ", true) &&
                 firstActorZ >= 20.0f;
 
             if (!SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_RV_ELEVATOR, true))
@@ -2108,11 +2460,11 @@ namespace
 
             session.rvState = 0;
             session.rvPillarToggleState = 0;
-            session.rvNextEventMs = sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.RingOfValor.FirstTimerMs", 20500u);
+            session.rvNextEventMs = sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.Ring.FirstTimerMs", 20500u);
             LogRingReplayState(session, viewer, "initialized");
         }
 
-        session.dynamicObjectsInitialized = true;
+        session.replayObjectsInitialized = true;
         return true;
     }
 
@@ -2151,11 +2503,11 @@ namespace
 
     static void UpdateDalaranReplayWater(Player* viewer, ActiveReplaySession& session)
     {
-        if (session.nativeMapId != 617 || !sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.DalaranWaterfall.Enable", true))
+        if (session.nativeMapId != 617 || !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.Enable", true))
             return;
 
-        uint32 warningMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.DalaranWaterfall.WarningSeconds", 5u));
-        uint32 durationMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.DalaranWaterfall.DurationSeconds", 30u));
+        uint32 warningMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds", 0u));
+        uint32 durationMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.DurationSeconds", 30u));
 
         while (session.dsNextEventMs != 0 && session.replayPlaybackMs >= session.dsNextEventMs)
         {
@@ -2200,7 +2552,7 @@ namespace
 
     static void UpdateRingReplayObjects(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
     {
-        if (session.nativeMapId != 618 || !sConfigMgr->GetOption<bool>("ArenaReplay.DynamicObjects.RingOfValor.Enable", true))
+        if (session.nativeMapId != 618 || !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Ring.Enable", true))
             return;
 
         while (session.rvNextEventMs != 0 && session.replayPlaybackMs >= session.rvNextEventMs)
@@ -2213,7 +2565,7 @@ namespace
                 ForceRingReplayClonesToUpperFloor(viewer, match, session);
                 LogReplayDynamicTimeline(session, viewer, "RV_FIRE", "open", "ok");
                 session.rvState = 1;
-                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.RingOfValor.CloseFireMs", 5000u));
+                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.Ring.CloseFireMs", 5000u));
             }
             else if (session.rvState == 1)
             {
@@ -2221,13 +2573,13 @@ namespace
                 SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_RV_FIRE_DOOR, false);
                 LogReplayDynamicTimeline(session, viewer, "RV_FIRE", "closed", "ok");
                 session.rvState = 2;
-                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.RingOfValor.FireToPillarMs", 20000u));
+                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.Ring.FireToPillarMs", 20000u));
             }
             else
             {
                 ToggleRingReplayPillars(viewer, session);
                 session.rvState = 3;
-                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.RingOfValor.PillarSwitchMs", 25000u));
+                session.rvNextEventMs = eventMs + std::max<uint32>(1u, sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.Ring.PillarSwitchMs", 25000u));
             }
         }
 
@@ -2240,14 +2592,14 @@ namespace
 
     static void UpdateReplayDynamicObjects(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
     {
-        if (!ReplayDynamicObjectsEnabled() || !session.dynamicObjectsInitialized || session.teardownInProgress)
+        if (!ReplayDynamicObjectsEnabled() || !session.replayObjectsInitialized || session.teardownInProgress)
             return;
 
-        uint32 gateDelayMs = sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.GateOpenDelayMs", 0u);
-        if (session.replayPlaybackMs >= gateDelayMs)
+        uint32 gateDelayMs = sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.GateOpenDelayMs", 0u);
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.StartWithGatesOpen", true) && session.replayPlaybackMs >= gateDelayMs)
             SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_GATE, true);
 
-        uint32 buffDelayMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.DynamicObjects.BuffDelaySeconds", 90u));
+        uint32 buffDelayMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.BuffDelaySeconds", 90u));
         if (session.replayPlaybackMs >= buffDelayMs)
             SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_BUFF, true);
 
@@ -2257,14 +2609,14 @@ namespace
 
     static void DespawnReplayDynamicObjects(Player* viewer, ActiveReplaySession& session)
     {
-        if (session.dynamicObjects.empty())
+        if (session.replayObjects.empty())
         {
-            session.dynamicObjectsSpawned = false;
-            session.dynamicObjectsInitialized = false;
+            session.replayObjectsSpawned = false;
+            session.replayObjectsInitialized = false;
             return;
         }
 
-        for (ReplayDynamicObjectBinding& binding : session.dynamicObjects)
+        for (ReplayDynamicObjectBinding& binding : session.replayObjects)
         {
             if (binding.cleaned)
                 continue;
@@ -2284,9 +2636,9 @@ namespace
             binding.guid.Clear();
         }
 
-        session.dynamicObjects.clear();
-        session.dynamicObjectsSpawned = false;
-        session.dynamicObjectsInitialized = false;
+        session.replayObjects.clear();
+        session.replayObjectsSpawned = false;
+        session.replayObjectsInitialized = false;
         session.nextDynamicObjectLogMs = 0;
         session.rvState = 0;
         session.rvNextEventMs = 0;
@@ -2340,7 +2692,7 @@ namespace
         uint64 viewerKey = player->GetGUID().GetCounter();
         bool returnToAnchor = session.sandboxTeleportIssued && session.anchorMapId != 0 && player->GetMapId() == session.replayMapId;
 
-        LOG_INFO("server.loading", "[RTG][REPLAY][STARTUP_CANCEL] replay={} viewerGuid={} nativeMap={} replayMap={} reason={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} dynamicObjects={} clones={} cameraAnchor={} result=begin",
+        LOG_INFO("server.loading", "[RTG][REPLAY][STARTUP_CANCEL] replay={} viewerGuid={} nativeMap={} replayMap={} reason={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} replayObjects={} clones={} cameraAnchor={} result=begin",
             session.replayId,
             viewerKey,
             session.nativeMapId,
@@ -2352,7 +2704,7 @@ namespace
             player->InBattleground() ? 1 : 0,
             player->GetPhaseMask(),
             session.replayPhaseMask,
-            session.dynamicObjects.size(),
+            session.replayObjects.size(),
             session.cloneBindings.size(),
             session.cameraAnchorGuid ? 1 : 0);
 
@@ -2566,6 +2918,7 @@ namespace
         session.lastAppliedActorGuid = 0;
         session.lastAppliedActorFlatIndex = 0;
         session.cameraStallCount = 0;
+        session.fixedCameraFallbackApplied = false;
     }
 
     static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok)
@@ -2631,6 +2984,26 @@ namespace
         {
             replayer->SetVisible(false);
             session.viewerHidden = true;
+        }
+
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.UseViewpoint", true) && !session.viewpointBound && session.cameraAnchorFailed)
+        {
+            if (ShouldCancelReplayForCameraAnchor(session))
+            {
+                if (session.hudStarted)
+                    RequestReplayTeardown(replayer, nullptr, "camera_anchor_failed", 0);
+                return false;
+            }
+
+            if (ReplayCameraFallbackMode() == 1 || ReplayBodyChaseFallbackDisabled())
+            {
+                if (!session.fixedCameraFallbackApplied && replayer->GetSession())
+                    ChatHandler(replayer->GetSession()).PSendSysMessage("Replay camera anchor unavailable; using fixed spectator view.");
+
+                session.lastAppliedActorGuid = track->guid;
+                session.lastAppliedActorFlatIndex = flatIndex;
+                return ApplyReplayFixedCameraFallback(replayer, session, "camera_anchor_unavailable");
+            }
         }
 
         bool actorChanged = (session.lastAppliedActorGuid != track->guid || session.lastAppliedActorFlatIndex != flatIndex);
@@ -2769,6 +3142,10 @@ namespace
         session.cloneBindings.clear();
         session.cameraAnchorGuid.Clear();
         session.viewpointBound = false;
+        session.cameraAnchorFailed = false;
+        session.cameraAnchorFailureLogged = false;
+        session.nextCameraAnchorRetryMs = 0;
+        session.fixedCameraFallbackApplied = false;
         session.spectatorShellActive = false;
         session.nativeMapId = 0;
         session.replayMapId = 0;
@@ -2780,9 +3157,9 @@ namespace
         session.nextAttachLogMs = 0;
         session.replayPlaybackMs = 0;
         session.replayLastServerMs = GetReplayNowMs();
-        session.dynamicObjects.clear();
-        session.dynamicObjectsSpawned = false;
-        session.dynamicObjectsInitialized = false;
+        session.replayObjects.clear();
+        session.replayObjectsSpawned = false;
+        session.replayObjectsInitialized = false;
         session.nextDynamicObjectLogMs = 0;
         session.rvState = 0;
         session.rvNextEventMs = 0;
@@ -3075,7 +3452,12 @@ public:
             }
 
             BindReplayViewpoint(replayer, match, session);
-            ApplyActorReplayView(replayer, match, session, bg->GetStartTime(), true);
+            bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime(), true);
+            if (!actorViewApplied && ShouldCancelReplayForCameraAnchor(session))
+            {
+                CancelReplayStartup(replayer, session, "camera_anchor_failed");
+                return;
+            }
             SendReplayHudPov(replayer, match, session, true);
             session.nextHudWatcherSyncMs = 0;
             SendReplayHudWatchers(bg, replayer, match, session, true);
@@ -3155,7 +3537,7 @@ public:
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime());
             SendReplayHudPov(replayer, match, session, false);
             SendReplayHudWatchers(bg, replayer, match, session, false);
-            if (!actorViewApplied && session.nextAnchorEnforceMs <= bg->GetStartTime())
+            if (!actorViewApplied && !session.teardownRequested && session.nextAnchorEnforceMs <= bg->GetStartTime())
             {
                 session.nextAnchorEnforceMs = bg->GetStartTime() + 500;
 
@@ -4540,7 +4922,12 @@ namespace
                 }
 
                 BindReplayViewpoint(replayer, match, session);
-                ApplyActorReplayView(replayer, match, session, session.replayPlaybackMs, true);
+                bool actorViewApplied = ApplyActorReplayView(replayer, match, session, session.replayPlaybackMs, true);
+                if (!actorViewApplied && ShouldCancelReplayForCameraAnchor(session))
+                {
+                    CancelReplayStartup(replayer, session, "camera_anchor_failed");
+                    continue;
+                }
                 SendReplayHudPov(replayer, match, session, true);
                 session.nextHudWatcherSyncMs = 0;
                 SendReplayHudWatchers(nullptr, replayer, match, session, true);
@@ -4617,7 +5004,7 @@ namespace
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, session.replayPlaybackMs);
             SendReplayHudPov(replayer, match, session, false);
             SendReplayHudWatchers(nullptr, replayer, match, session, false);
-            if (!actorViewApplied && session.nextAnchorEnforceMs <= session.replayPlaybackMs)
+            if (!actorViewApplied && !session.teardownRequested && session.nextAnchorEnforceMs <= session.replayPlaybackMs)
             {
                 session.nextAnchorEnforceMs = session.replayPlaybackMs + 500;
                 if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorOnly.AnchorViewer", true) && replayer->GetMapId() == session.replayMapId)
