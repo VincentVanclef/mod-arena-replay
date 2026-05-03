@@ -262,6 +262,7 @@ struct ActiveReplaySession
     float rvFirstActorZ = 0.0f;
     uint32 dsWaterState = 0;
     uint32 dsNextEventMs = 0;
+    uint32 dsWaterCycle = 0;
     uint32 cameraStallCount = 0;
     uint32 priorDisplayId = 0;
     bool invisibleDisplayApplied = false;
@@ -290,6 +291,9 @@ namespace
     static void ResetActorReplayView(Player* replayer, ActiveReplaySession& session);
     static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok);
     static ReplayActorAppearanceSnapshot const* FindReplayActorAppearanceSnapshot(MatchRecord const& match, uint64 actorGuid);
+    static MatchRecord& EnsureLiveMatchRecord(Battleground* bg);
+    static void CaptureOrUpdateReplayActorAppearance(Battleground* bg, Player* player, MatchRecord& match, char const* source);
+    static void ReconcileReplayActorAppearanceWinnerSides(MatchRecord& match);
     static Creature* EnsureReplayCameraAnchor(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void BindReplayViewpoint(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void ClearReplayViewpoint(Player* viewer, ActiveReplaySession& session);
@@ -517,6 +521,24 @@ namespace
         return value;
     }
 
+
+    static MatchRecord& EnsureLiveMatchRecord(Battleground* bg)
+    {
+        MatchRecord& record = records[bg ? bg->GetInstanceID() : 0];
+        if (bg)
+        {
+            record.typeId = bg->GetBgTypeID();
+            record.arenaTypeId = bg->GetArenaType();
+            record.mapId = bg->GetMapId();
+        }
+        return record;
+    }
+
+    static bool IsValidReplayAppearanceDisplay(uint32 displayId)
+    {
+        return displayId != 0;
+    }
+
     static std::vector<ActorTrack>* SelectTracks(MatchRecord& match, bool winnerSide)
     {
         return winnerSide ? &match.winnerActorTracks : &match.loserActorTracks;
@@ -628,6 +650,7 @@ namespace
         if (!bg || !sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.Enable", true))
             return;
 
+        MatchRecord& match = EnsureLiveMatchRecord(bg);
         LiveActorRecorderState& state = liveActorRecorders[bg->GetInstanceID()];
         uint32 nowMs = bg->GetStartTime();
         if (state.nextSampleMs > nowMs)
@@ -640,6 +663,9 @@ namespace
             Player* actor = pair.second;
             if (!actor || actor->IsSpectator())
                 continue;
+
+            if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AppearanceCaptureOnSample", true))
+                CaptureOrUpdateReplayActorAppearance(bg, actor, match, "sample");
 
             std::unordered_map<uint64, ActorTrack>& bucket = actor->GetBgTeamId() == TEAM_ALLIANCE ? state.allianceTracks : state.hordeTracks;
             ActorTrack& track = bucket[actor->GetGUID().GetRawValue()];
@@ -1422,26 +1448,108 @@ namespace
         return snapshot;
     }
 
+    static void CaptureOrUpdateReplayActorAppearance(Battleground* bg, Player* player, MatchRecord& match, char const* source)
+    {
+        if (!bg || !player || player->IsSpectator())
+            return;
+
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.RecordAppearanceSnapshots", true))
+            return;
+
+        ReplayActorAppearanceSnapshot snapshot = BuildReplayActorAppearanceSnapshot(player, false);
+        if (!snapshot.guid)
+            return;
+
+        if (!IsValidReplayAppearanceDisplay(snapshot.displayId) && !IsValidReplayAppearanceDisplay(snapshot.nativeDisplayId))
+        {
+            LOG_WARN("server.loading", "[RTG][REPLAY][APPEARANCE_CAPTURE] replayInstance={} actorGuid={} name={} race={} class={} gender={} displayId={} nativeDisplayId={} itemDisplayCount=0 source={} result=invalid_display",
+                bg->GetInstanceID(),
+                snapshot.guid,
+                snapshot.name,
+                uint32(snapshot.race),
+                uint32(snapshot.playerClass),
+                uint32(snapshot.gender),
+                snapshot.displayId,
+                snapshot.nativeDisplayId,
+                source ? source : "unknown");
+            return;
+        }
+
+        uint32 itemDisplayCount = 0;
+        if (snapshot.mainhandDisplayId) ++itemDisplayCount;
+        if (snapshot.offhandDisplayId) ++itemDisplayCount;
+        if (snapshot.rangedDisplayId) ++itemDisplayCount;
+
+        auto existing = match.actorAppearanceSnapshots.find(snapshot.guid);
+        if (existing != match.actorAppearanceSnapshots.end())
+        {
+            // Preserve an already-valid display if a late sample is somehow less useful.
+            if (!snapshot.displayId && existing->second.displayId)
+                snapshot.displayId = existing->second.displayId;
+            if (!snapshot.nativeDisplayId && existing->second.nativeDisplayId)
+                snapshot.nativeDisplayId = existing->second.nativeDisplayId;
+        }
+
+        match.actorAppearanceSnapshots[snapshot.guid] = snapshot;
+
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AppearanceDebug", true))
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_CAPTURE] replayInstance={} actorGuid={} name={} race={} class={} gender={} displayId={} nativeDisplayId={} itemDisplayCount={} source={} result=ok",
+                bg->GetInstanceID(),
+                snapshot.guid,
+                snapshot.name,
+                uint32(snapshot.race),
+                uint32(snapshot.playerClass),
+                uint32(snapshot.gender),
+                snapshot.displayId,
+                snapshot.nativeDisplayId,
+                itemDisplayCount,
+                source ? source : "unknown");
+        }
+    }
+
+    static void ReconcileReplayActorAppearanceWinnerSides(MatchRecord& match)
+    {
+        for (ActorTrack const& track : match.winnerActorTracks)
+        {
+            auto it = match.actorAppearanceSnapshots.find(track.guid);
+            if (it != match.actorAppearanceSnapshots.end())
+                it->second.winnerSide = true;
+        }
+
+        for (ActorTrack const& track : match.loserActorTracks)
+        {
+            auto it = match.actorAppearanceSnapshots.find(track.guid);
+            if (it != match.actorAppearanceSnapshots.end())
+                it->second.winnerSide = false;
+        }
+    }
+
     static void CaptureReplayActorAppearanceSnapshots(Battleground* bg, MatchRecord& match, TeamId winnerTeamId)
     {
-        match.actorAppearanceSnapshots.clear();
-
+        // Do not clear here. End-of-match captures can run after players have already been
+        // removed from the arena; clearing would erase valid join/sample snapshots.
         if (!bg)
             return;
 
+        uint32 before = uint32(match.actorAppearanceSnapshots.size());
         for (auto const& playerPair : bg->GetPlayers())
         {
             Player* player = playerPair.second;
             if (!player || player->IsSpectator())
                 continue;
 
-            bool winnerSide = player->GetBgTeamId() == winnerTeamId;
-            ReplayActorAppearanceSnapshot snapshot = BuildReplayActorAppearanceSnapshot(player, winnerSide);
-            if (!snapshot.guid)
-                continue;
-
-            match.actorAppearanceSnapshots[snapshot.guid] = std::move(snapshot);
+            CaptureOrUpdateReplayActorAppearance(bg, player, match, "save");
+            auto it = match.actorAppearanceSnapshots.find(player->GetGUID().GetRawValue());
+            if (it != match.actorAppearanceSnapshots.end())
+                it->second.winnerSide = player->GetBgTeamId() == winnerTeamId;
         }
+
+        ReconcileReplayActorAppearanceWinnerSides(match);
+        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_CAPTURE] replayInstance={} snapshotCountBefore={} snapshotCountAfter={} source=save result=ok",
+            bg->GetInstanceID(),
+            before,
+            uint32(match.actorAppearanceSnapshots.size()));
     }
 
     static void PersistReplayActorAppearanceSnapshots(uint32 replayId, MatchRecord const& match)
@@ -1451,6 +1559,7 @@ namespace
 
         CharacterDatabase.Execute("DELETE FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}", replayId);
 
+        uint32 persisted = 0;
         for (auto const& pair : match.actorAppearanceSnapshots)
         {
             ReplayActorAppearanceSnapshot const& snapshot = pair.second;
@@ -1471,7 +1580,10 @@ namespace
                 snapshot.offhandDisplayId,
                 snapshot.rangedDisplayId
             );
+            ++persisted;
         }
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_PERSIST] replayId={} snapshotCount={} result=ok", replayId, persisted);
     }
 
     static void LoadReplayActorAppearanceSnapshots(MatchRecord& record, uint32 replayId)
@@ -1486,8 +1598,12 @@ namespace
             "FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}",
             replayId);
         if (!result)
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD] replayId={} snapshotCount=0 result=empty", replayId);
             return;
+        }
 
+        uint32 loaded = 0;
         do
         {
             Field* fields = result->Fetch();
@@ -1507,9 +1623,14 @@ namespace
             snapshot.offhandDisplayId = fields[9].Get<uint32>();
             snapshot.rangedDisplayId = fields[10].Get<uint32>();
             if (snapshot.guid)
+            {
                 record.actorAppearanceSnapshots[snapshot.guid] = std::move(snapshot);
+                ++loaded;
+            }
         }
         while (result->NextRow());
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD] replayId={} snapshotCount={} result=ok", replayId, loaded);
     }
 
     static ReplayActorAppearanceSnapshot const* FindReplayActorAppearanceSnapshot(MatchRecord const& match, uint64 actorGuid)
@@ -2744,6 +2865,24 @@ namespace
         return seconds * IN_MILLISECONDS;
     }
 
+
+    static uint32 GetDalaranWaterRandomDelayMs(ActiveReplaySession const& session)
+    {
+        uint32 minSeconds = sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.TimerMinSeconds", 30u);
+        uint32 maxSeconds = sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.TimerMaxSeconds", 60u);
+        if (maxSeconds < minSeconds)
+            std::swap(minSeconds, maxSeconds);
+
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.RandomizeLikeLive", true))
+            return SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds", minSeconds));
+
+        uint32 span = maxSeconds - minSeconds + 1;
+        uint32 seed = session.replayId ? session.replayId : session.nativeMapId;
+        seed ^= (session.dsWaterCycle + 1u) * 1103515245u;
+        seed ^= 0x9E3779B9u;
+        return SecondsToMs(minSeconds + (span ? (seed % span) : 0u));
+    }
+
     static uint32 ResolveReplayMapId(uint32 nativeMapId)
     {
         uint32 configuredMapId = 0;
@@ -3142,7 +3281,11 @@ namespace
         if (session.nativeMapId == 617 && sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.Enable", true))
         {
             session.dsWaterState = 0;
-            session.dsNextEventMs = session.matchOpenMs + SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds", 45u));
+            session.dsWaterCycle = 0;
+            SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_COLLISION, false);
+            SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_VISUAL, false);
+            session.dsNextEventMs = session.matchOpenMs + GetDalaranWaterRandomDelayMs(session);
+            LogReplayDynamicTimeline(session, viewer, "DS_WATER", "scheduled", "ok");
         }
 
         if (session.nativeMapId == 618 && sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.Ring.Enable", true))
@@ -3205,8 +3348,9 @@ namespace
         if (session.nativeMapId != 617 || !sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.Enable", true))
             return;
 
-        uint32 warningMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds", 0u));
+        uint32 warningMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds", 5u));
         uint32 durationMs = SecondsToMs(sConfigMgr->GetOption<uint32>("ArenaReplay.ReplayObjects.DalaranWater.DurationSeconds", 30u));
+        bool collisionEnabled = sConfigMgr->GetOption<bool>("ArenaReplay.ReplayObjects.DalaranWater.CollisionEnable", false);
 
         while (session.dsNextEventMs != 0 && session.replayPlaybackMs >= session.dsNextEventMs)
         {
@@ -3222,20 +3366,24 @@ namespace
             {
                 session.dsWaterState = 2;
                 SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_VISUAL, true);
-                SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_COLLISION, true);
-                LogReplayDynamicTimeline(session, viewer, "DS_WATER", "active", "ok");
+                SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_COLLISION, collisionEnabled);
+                LogReplayDynamicTimeline(session, viewer, "DS_WATER", collisionEnabled ? "active_collision" : "active_visual", "ok");
                 session.dsNextEventMs += std::max<uint32>(1u, durationMs);
             }
             else if (session.dsWaterState == 2)
             {
-                session.dsWaterState = 3;
+                session.dsWaterState = 0;
                 SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_COLLISION, false);
                 SetReplayDynamicObjectsByRole(viewer, session, RTG_REPLAY_OBJECT_DS_WATER_VISUAL, false);
+                ++session.dsWaterCycle;
                 LogReplayDynamicTimeline(session, viewer, "DS_WATER", "off", "ok");
-                session.dsNextEventMs = 0;
+                session.dsNextEventMs += GetDalaranWaterRandomDelayMs(session);
             }
             else
-                session.dsNextEventMs = 0;
+            {
+                session.dsWaterState = 0;
+                session.dsNextEventMs += GetDalaranWaterRandomDelayMs(session);
+            }
         }
     }
 
@@ -3345,6 +3493,7 @@ namespace
         session.rvFirstActorZ = 0.0f;
         session.dsWaterState = 0;
         session.dsNextEventMs = 0;
+        session.dsWaterCycle = 0;
     }
 
     static bool ReplayViewerHasDisableGravity(Player* player)
@@ -3362,11 +3511,19 @@ namespace
         if (!player)
             return;
 
-        player->SetCanFly(false);
-        player->SetDisableGravity(false);
-        player->SetHover(false);
-        player->SetClientControl(player, true);
         player->SetIsSpectator(false);
+        player->SetClientControl(player, true);
+        player->SetHover(false);
+        player->SetDisableGravity(false);
+        player->SetCanFly(false);
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_DISABLE_GRAVITY);
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_HOVER);
+#ifdef MOVEMENTFLAG_CAN_FLY
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_CAN_FLY);
+#endif
+#ifdef MOVEMENTFLAG_FLYING
+        player->RemoveUnitMovementFlag(MOVEMENTFLAG_FLYING);
+#endif
         player->StopMoving();
     }
 
@@ -3978,6 +4135,7 @@ namespace
         session.rvFirstActorZ = 0.0f;
         session.dsWaterState = 0;
         session.dsNextEventMs = 0;
+        session.dsWaterCycle = 0;
         session.cameraStallCount = 0;
         session.priorDisplayId = player->GetDisplayId();
         session.invisibleDisplayApplied = false;
@@ -4080,14 +4238,9 @@ public:
         if (std::find(watchList.begin(), watchList.end(), packet.GetOpcode()) == watchList.end())
             return true;
 
-        if (records.find(bg->GetInstanceID()) == records.end())
-            records[bg->GetInstanceID()].packets.clear();
-        MatchRecord& record = records[bg->GetInstanceID()];
+        MatchRecord& record = EnsureLiveMatchRecord(bg);
 
         uint32 timestamp = bg->GetStartTime();
-        record.typeId = bg->GetBgTypeID();
-        record.arenaTypeId = bg->GetArenaType();
-        record.mapId = bg->GetMapId();
         // push back packet inside queue of matchId 0
         record.packets.push_back({ timestamp, /* copy */ WorldPacket(packet) });
         return true;
@@ -4411,9 +4564,18 @@ public:
         if (player->IsSpectator())
             return;
 
+        if (!bg)
+            return;
+
         // Ensure recorder slots are assigned deterministically as players join.
         // (Recording still starts only once the arena is in progress.)
         GetOrAssignRecorderGuid(bg, player);
+
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AppearanceCaptureOnJoin", true))
+        {
+            MatchRecord& match = EnsureLiveMatchRecord(bg);
+            CaptureOrUpdateReplayActorAppearance(bg, player, match, "join");
+        }
 
         if (!bg->isArena() && !sConfigMgr->GetOption<bool>("ArenaReplay.SaveBattlegrounds", true))
             return;
@@ -4483,7 +4645,9 @@ public:
 
         MatchRecord& match = it->second;
         FinalizeActorSnapshots(bg, match, winnerTeamId);
-        CaptureReplayActorAppearanceSnapshots(bg, match, winnerTeamId);
+        ReconcileReplayActorAppearanceWinnerSides(match);
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AppearanceCaptureOnSave", true))
+            CaptureReplayActorAppearanceSnapshots(bg, match, winnerTeamId);
 
         /** serialize arena replay data **/
         ArenaReplayByteBuffer buffer;

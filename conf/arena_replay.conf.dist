@@ -651,6 +651,60 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #        Example:     ArenaReplay.CloneScene.FallbackDisplay.Default = 49
 #                     Uses display 49 as the generic visible actor fallback.
 #
+#    ArenaReplay.CloneScene.RecordAppearanceSnapshots
+#        Description: Enables persistent actor appearance snapshots for newly
+#                     recorded arena replays. These snapshots let replay clones
+#                     use real player display ids instead of generic fallback
+#                     creature-template models.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.RecordAppearanceSnapshots = 1
+#                     New replays save actor display data for clone playback.
+#
+#    ArenaReplay.CloneScene.AppearanceCaptureOnJoin
+#        Description: Captures actor appearance as soon as the player enters the
+#                     live arena. This protects against end-of-match cleanup
+#                     erasing access to player models before replay save.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.AppearanceCaptureOnJoin = 1
+#                     Captures appearances during arena join.
+#
+#    ArenaReplay.CloneScene.AppearanceCaptureOnSample
+#        Description: Refreshes actor appearance while sampling live actor
+#                     movement tracks. This is the most reliable capture point
+#                     because players are definitely present in the arena.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.AppearanceCaptureOnSample = 1
+#                     Captures appearances during live actor sampling.
+#
+#    ArenaReplay.CloneScene.AppearanceCaptureOnSave
+#        Description: Performs a final best-effort appearance refresh during
+#                     replay save. This never clears earlier valid snapshots.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.AppearanceCaptureOnSave = 1
+#                     Refreshes snapshot data during save.
+#
+#    ArenaReplay.CloneScene.AppearanceDebug
+#        Description: Enables APPEARANCE_CAPTURE/PERSIST/LOAD diagnostics used
+#                     to verify new replays are storing actor visuals.
+#
+#        Default:     1 - Enabled while stabilizing
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.AppearanceDebug = 1
+#                     Logs actor appearance capture details.
+#
 #    ArenaReplay.CloneScene.SyncMs
 #        Description: Interval, in milliseconds, used when synchronizing replay
 #                     surrogate clones from actor tracks.
@@ -705,6 +759,11 @@ ArenaReplay.CloneScene.FallbackDisplay.Priest = 49
 ArenaReplay.CloneScene.FallbackDisplay.Rogue = 49
 ArenaReplay.CloneScene.FallbackDisplay.Warlock = 49
 ArenaReplay.CloneScene.FallbackDisplay.DeathKnight = 49
+ArenaReplay.CloneScene.RecordAppearanceSnapshots = 1
+ArenaReplay.CloneScene.AppearanceCaptureOnJoin = 1
+ArenaReplay.CloneScene.AppearanceCaptureOnSample = 1
+ArenaReplay.CloneScene.AppearanceCaptureOnSave = 1
+ArenaReplay.CloneScene.AppearanceDebug = 1
 ArenaReplay.CloneScene.SyncMs = 50
 
 ########################################
@@ -938,23 +997,51 @@ ArenaReplay.ReplayMap.RequireResolved = 1
 #        Example:     ArenaReplay.ReplayObjects.DalaranWater.CollisionRequired = 0
 #                     Missing collision is logged but does not abort replay.
 #
+#    ArenaReplay.ReplayObjects.DalaranWater.RandomizeLikeLive
+#        Description: Uses BattlegroundDS-like deterministic waterfall timing.
+#                     The first warning and later repeats are scheduled in a
+#                     stable random range per replay, matching live arena
+#                     behavior more closely than a fixed timestamp.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ReplayObjects.DalaranWater.RandomizeLikeLive = 1
+#                     Uses a replay-seeded 30-60 second warning delay.
+#
+#    ArenaReplay.ReplayObjects.DalaranWater.TimerMinSeconds
+#        Description: Minimum seconds before the next Dalaran waterfall warning.
+#
+#        Default:     30
+#
+#        Example:     ArenaReplay.ReplayObjects.DalaranWater.TimerMinSeconds = 30
+#                     The warning can start after 30 seconds minimum.
+#
+#    ArenaReplay.ReplayObjects.DalaranWater.TimerMaxSeconds
+#        Description: Maximum seconds before the next Dalaran waterfall warning.
+#
+#        Default:     60
+#
+#        Example:     ArenaReplay.ReplayObjects.DalaranWater.TimerMaxSeconds = 60
+#                     The warning can start after 60 seconds maximum.
+#
 #    ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds
-#        Description: Replay time, in seconds, before the Dalaran waterfall
-#                     event starts.
+#        Description: Legacy fixed first delay used only when RandomizeLikeLive
+#                     is disabled.
 #
-#        Default:     45
+#        Default:     30
 #
-#        Example:     ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds = 45
-#                     The first Dalaran water event starts at 45 seconds.
+#        Example:     ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds = 30
+#                     Fixed first delay when live-like timing is off.
 #
 #    ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds
-#        Description: Optional visual-only warning duration, in seconds, before
-#                     Dalaran waterfall collision activates.
+#        Description: Visual-only warning duration, in seconds, before active
+#                     waterfall state. Live Dalaran Sewers uses 5 seconds.
 #
-#        Default:     0
+#        Default:     5
 #
-#        Example:     ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds = 0
-#                     The water event enters active state immediately.
+#        Example:     ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds = 5
+#                     Shows warning visuals for 5 seconds.
 #
 #    ArenaReplay.ReplayObjects.DalaranWater.DurationSeconds
 #        Description: Duration, in seconds, of the active Dalaran waterfall
@@ -1037,8 +1124,11 @@ ArenaReplay.ReplayObjects.BuffDelaySeconds = 90
 ArenaReplay.ReplayObjects.DalaranWater.Enable = 1
 ArenaReplay.ReplayObjects.DalaranWater.CollisionEnable = 0
 ArenaReplay.ReplayObjects.DalaranWater.CollisionRequired = 0
-ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds = 45
-ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds = 0
+ArenaReplay.ReplayObjects.DalaranWater.RandomizeLikeLive = 1
+ArenaReplay.ReplayObjects.DalaranWater.TimerMinSeconds = 30
+ArenaReplay.ReplayObjects.DalaranWater.TimerMaxSeconds = 60
+ArenaReplay.ReplayObjects.DalaranWater.FirstDelaySeconds = 30
+ArenaReplay.ReplayObjects.DalaranWater.WarningSeconds = 5
 ArenaReplay.ReplayObjects.DalaranWater.DurationSeconds = 30
 ArenaReplay.ReplayObjects.Ring.Enable = 1
 ArenaReplay.ReplayObjects.Ring.DeriveInitialStateFromFirstActorZ = 1
@@ -1233,6 +1323,9 @@ ArenaReplay.SpectatorShell.DisableGravity = 1
 ArenaReplay.SpectatorShell.UseInvisibleDisplay = 1
 ArenaReplay.SpectatorShell.InvisibleDisplayId = 11686
 ArenaReplay.SpectatorShell.RestoreOnExit = 1
+ArenaReplay.SpectatorShell.ForceRestoreMovementFlags = 1
+ArenaReplay.SpectatorShell.DelayedRestoreVerifyMs = 500
+ArenaReplay.SpectatorShell.SecondDelayedRestoreVerifyMs = 1500
 
 ########################################
 # ArenaReplay Spectator Restrictions
