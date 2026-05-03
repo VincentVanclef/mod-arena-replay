@@ -368,6 +368,102 @@ ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
 #        Example:     ArenaReplay.Playback.PacketBudgetPerUpdate = 30
 #                     Uses a gentler playback burst size for smoother arena viewing.
 #
+#    ArenaReplay.Playback.Mode
+#        Description: Selects the copied-instance replay playback authority.
+#
+#                     Mode 1 makes clone scene, replay objects, and replay
+#                     camera ownership authoritative. Recorded packets are kept
+#                     for non-world effects only after clone-mode filtering.
+#
+#        Default:     1 - Clone mode
+#
+#        Example:     ArenaReplay.Playback.Mode = 1
+#                     Copied replay maps use session-spawned clone visuals.
+#
+#    ArenaReplay.Playback.CloneMode.Enable
+#        Description: Enables clone-mode playback behavior.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.Enable = 1
+#                     Actor tracks drive visible replay clones.
+#
+#    ArenaReplay.Playback.CloneMode.SendRecordedWorldPackets
+#        Description: Allows recorded world-object/player packets through
+#                     during clone-mode replay.
+#
+#                     Keep disabled for copied replay maps so recorded object
+#                     packets cannot create one-team-only ghosts or delete
+#                     session-spawned clones.
+#
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.SendRecordedWorldPackets = 0
+#                     Clone scene remains authoritative for world visuals.
+#
+#    ArenaReplay.Playback.CloneMode.FilterObjectUpdatePackets
+#        Description: Filters recorded object update, compressed update,
+#                     destroy-object, and gameobject despawn packets when
+#                     recorded world packets are disabled.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.FilterObjectUpdatePackets = 1
+#                     Recorded object updates cannot overwrite clone visuals.
+#
+#    ArenaReplay.Playback.CloneMode.FilterMovementPackets
+#        Description: Filters recorded movement packets when clone mode owns
+#                     actor movement.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.FilterMovementPackets = 1
+#                     Actor tracks, not raw movement packets, move replay clones.
+#
+#    ArenaReplay.Playback.CloneMode.StartAtFirstActorFrame
+#        Description: Uses the first playable actor frame as clone scene start
+#                     for replays that do not have a separate arena-start mark.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.StartAtFirstActorFrame = 1
+#                     Clone playback starts at first available actor motion.
+#
+#    ArenaReplay.Playback.CloneMode.TrimPreMatchDeadAir
+#        Description: Skips pre-match packet dead air before the first playable
+#                     actor frame.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.TrimPreMatchDeadAir = 1
+#                     Viewers do not wait through empty pre-match time.
+#
+#    ArenaReplay.Playback.CloneMode.PrewarmClonesAtFirstFrame
+#        Description: Builds and places all playable actor clones at their
+#                     first valid frame before playback/HUD startup.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.PrewarmClonesAtFirstFrame = 1
+#                     Both teams appear as clones immediately after attach.
+#
+#    ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame
+#        Description: Treats the first playable actor frame as match-open time
+#                     for gates, buffs, and arena object timelines.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
+#                     Gate and buff timers are relative to first actor motion.
+#
 
 ArenaReplay.ActorSpectate.Enable = 1
 ArenaReplay.ActorSpectate.SampleMs = 250
@@ -379,6 +475,15 @@ ArenaReplay.ActorSpectate.FollowHeight = 1.75
 ArenaReplay.ActorSpectate.SnapDistance = 1.10
 ArenaReplay.ActorSpectate.OrientationLerpPct = 0.45
 ArenaReplay.Playback.PacketBudgetPerUpdate = 40
+ArenaReplay.Playback.Mode = 1
+ArenaReplay.Playback.CloneMode.Enable = 1
+ArenaReplay.Playback.CloneMode.SendRecordedWorldPackets = 0
+ArenaReplay.Playback.CloneMode.FilterObjectUpdatePackets = 1
+ArenaReplay.Playback.CloneMode.FilterMovementPackets = 1
+ArenaReplay.Playback.CloneMode.StartAtFirstActorFrame = 1
+ArenaReplay.Playback.CloneMode.TrimPreMatchDeadAir = 1
+ArenaReplay.Playback.CloneMode.PrewarmClonesAtFirstFrame = 1
+ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 
 
 ########################################
@@ -712,7 +817,8 @@ ArenaReplay.ReplayMap.RequireResolved = 1
 #        Description: Starts replay playback with gates already open.
 #
 #                     Current actor tracks begin in active match time, so the
-#                     default opens gates before clones appear.
+#                     default opens gates at normalized match-open before
+#                     clones appear when pre-match dead air is trimmed.
 #
 #        Default:     1 - Enabled
 #                     0 - Disabled
@@ -720,9 +826,22 @@ ArenaReplay.ReplayMap.RequireResolved = 1
 #        Example:     ArenaReplay.ReplayObjects.StartWithGatesOpen = 1
 #                     Gates are opened immediately during replay initialization.
 #
+#    ArenaReplay.ReplayObjects.OpenGatesAtMatchOpen
+#        Description: Opens gates at clone-mode match-open time.
+#
+#                     With pre-match trimming enabled, match-open is normalized
+#                     to replay start. With trimming disabled, gates remain
+#                     closed until the first playable actor frame timestamp.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ReplayObjects.OpenGatesAtMatchOpen = 1
+#                     Gate state follows the normalized clone-mode timeline.
+#
 #    ArenaReplay.ReplayObjects.GateOpenDelayMs
 #        Description: Replay time, in milliseconds, before opening spawned
-#                     gates when StartWithGatesOpen is disabled.
+#                     gates after the selected gate-open baseline.
 #
 #        Default:     0
 #
@@ -863,6 +982,7 @@ ArenaReplay.ReplayObjects.AbortIfRequiredStructuralObjectFails = 1
 ArenaReplay.ReplayObjects.AbortIfRequiredGateFails = 1
 ArenaReplay.ReplayObjects.SpawnBeforeClones = 1
 ArenaReplay.ReplayObjects.StartWithGatesOpen = 1
+ArenaReplay.ReplayObjects.OpenGatesAtMatchOpen = 1
 ArenaReplay.ReplayObjects.GateOpenDelayMs = 0
 ArenaReplay.ReplayObjects.BuffDelaySeconds = 90
 ArenaReplay.ReplayObjects.DalaranWater.Enable = 1
@@ -995,6 +1115,75 @@ ArenaReplay.Return.SafeFallbackX = 1629.85
 ArenaReplay.Return.SafeFallbackY = -4373.64
 ArenaReplay.Return.SafeFallbackZ = 31.5573
 ArenaReplay.Return.SafeFallbackO = 3.69762
+
+########################################
+# ArenaReplay Spectator Shell
+########################################
+#
+#    ArenaReplay.SpectatorShell.HideViewerBody
+#        Description: Hides the live replay viewer body during copied-instance
+#                     clone playback.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.HideViewerBody = 1
+#                     The viewer body remains hidden while clones are watched.
+#
+#    ArenaReplay.SpectatorShell.MoveBodyToHoldingPoint
+#        Description: Moves the hidden viewer body to the fixed arena overview
+#                     holding point after replay map attach.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.MoveBodyToHoldingPoint = 1
+#                     The viewer body is parked away from actor chase motion.
+#
+#    ArenaReplay.SpectatorShell.DisableGravity
+#        Description: Enables fly/hover/no-gravity state for the hidden viewer
+#                     shell during replay.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.DisableGravity = 1
+#                     The hidden viewer body does not fall during replay.
+#
+#    ArenaReplay.SpectatorShell.UseInvisibleDisplay
+#        Description: Applies an invisible display id to the hidden viewer body
+#                     while copied-instance clone replay is active.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.UseInvisibleDisplay = 1
+#                     Body visibility has both visibility and display guards.
+#
+#    ArenaReplay.SpectatorShell.InvisibleDisplayId
+#        Description: Display id used for the invisible viewer shell.
+#
+#        Default:     11686
+#
+#        Example:     ArenaReplay.SpectatorShell.InvisibleDisplayId = 11686
+#                     Uses display 11686 while the body is hidden.
+#
+#    ArenaReplay.SpectatorShell.RestoreOnExit
+#        Description: Restores the viewer display id and movement/visibility
+#                     state when replay exits.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.RestoreOnExit = 1
+#                     Replay teardown restores the viewer body.
+#
+ArenaReplay.SpectatorShell.HideViewerBody = 1
+ArenaReplay.SpectatorShell.MoveBodyToHoldingPoint = 1
+ArenaReplay.SpectatorShell.DisableGravity = 1
+ArenaReplay.SpectatorShell.UseInvisibleDisplay = 1
+ArenaReplay.SpectatorShell.InvisibleDisplayId = 11686
+ArenaReplay.SpectatorShell.RestoreOnExit = 1
 
 ########################################
 # ArenaReplay Spectator Restrictions
