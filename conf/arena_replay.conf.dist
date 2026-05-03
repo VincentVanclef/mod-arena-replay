@@ -615,6 +615,42 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #        Example:     ArenaReplay.CloneScene.Fallback.Nagrand.X = 4055
 #                     Tunes the fixed Nagrand replay overview position.
 #
+#    ArenaReplay.CloneScene.GenericFallbackDisplayByClass
+#        Description: Uses per-class fallback display configuration when a
+#                     replay actor snapshot is missing or unusable.
+#
+#                     The immediate goal is visibility. These generic displays
+#                     can be replaced later with nicer race/class visuals.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.GenericFallbackDisplayByClass = 1
+#                     Missing actor appearances use class fallback displays.
+#
+#    ArenaReplay.CloneScene.AbortInvisibleFallbackClones
+#        Description: Rejects clone prewarm for an actor if display repair still
+#                     leaves the clone invisible.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.CloneScene.AbortInvisibleFallbackClones = 1
+#                     Prevents invisible actor clones from counting as ready.
+#
+#    ArenaReplay.CloneScene.FallbackDisplay.*
+#        Description: Visible display ids used when replay actor appearance
+#                     snapshots are missing.
+#
+#                     Do not set these to the camera anchor display or the
+#                     spectator-shell invisible display. The distributed
+#                     fallback is intentionally plain but visible.
+#
+#        Default:     49
+#
+#        Example:     ArenaReplay.CloneScene.FallbackDisplay.Default = 49
+#                     Uses display 49 as the generic visible actor fallback.
+#
 #    ArenaReplay.CloneScene.SyncMs
 #        Description: Interval, in milliseconds, used when synchronizing replay
 #                     surrogate clones from actor tracks.
@@ -656,6 +692,19 @@ ArenaReplay.CloneScene.Fallback.RingOfValor.X = 763
 ArenaReplay.CloneScene.Fallback.RingOfValor.Y = -284
 ArenaReplay.CloneScene.Fallback.RingOfValor.Z = 35
 ArenaReplay.CloneScene.Fallback.RingOfValor.O = 0
+ArenaReplay.CloneScene.GenericFallbackDisplayByClass = 1
+ArenaReplay.CloneScene.AbortInvisibleFallbackClones = 1
+ArenaReplay.CloneScene.FallbackDisplay.Default = 49
+ArenaReplay.CloneScene.FallbackDisplay.Druid = 49
+ArenaReplay.CloneScene.FallbackDisplay.Mage = 49
+ArenaReplay.CloneScene.FallbackDisplay.Hunter = 49
+ArenaReplay.CloneScene.FallbackDisplay.Warrior = 49
+ArenaReplay.CloneScene.FallbackDisplay.Shaman = 49
+ArenaReplay.CloneScene.FallbackDisplay.Paladin = 49
+ArenaReplay.CloneScene.FallbackDisplay.Priest = 49
+ArenaReplay.CloneScene.FallbackDisplay.Rogue = 49
+ArenaReplay.CloneScene.FallbackDisplay.Warlock = 49
+ArenaReplay.CloneScene.FallbackDisplay.DeathKnight = 49
 ArenaReplay.CloneScene.SyncMs = 50
 
 ########################################

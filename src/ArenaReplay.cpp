@@ -233,6 +233,7 @@ struct ActiveReplaySession
     bool cameraAnchorFailureLogged = false;
     uint32 nextCameraAnchorRetryMs = 0;
     bool fixedCameraFallbackApplied = false;
+    uint32 cameraAnchorDisplayId = 0;
     bool spectatorShellActive = false;
     uint32 nativeMapId = 0;
     uint32 replayMapId = 0;
@@ -295,6 +296,8 @@ namespace
     static bool IsReplayViewerMapAttached(Player* viewer, Battleground* bg, ActiveReplaySession const& session);
     static bool GetReplayBootstrapFrame(MatchRecord const& match, ActorFrame& frame, uint64& actorGuid, bool& winnerSide);
     static bool ReplayDynamicObjectsDebugEnabled();
+    static bool IsInvalidReplayCloneDisplay(uint32 displayId, ActiveReplaySession const& session);
+    static uint32 ResolveVisibleReplayFallbackDisplay(ActorTrack const& track, bool winnerSide);
     static uint32 ResolveReplayMapId(uint32 nativeMapId);
     static uint32 AllocateReplayPrivatePhaseMask(uint64 viewerKey);
     static bool ApplyReplayViewerPrivatePhase(Player* viewer, ActiveReplaySession& session);
@@ -1517,21 +1520,72 @@ namespace
         return &it->second;
     }
 
-    static void ApplyReplayActorAppearanceToClone(Creature* clone, ReplayActorAppearanceSnapshot const* snapshot)
+    static uint32 ApplyReplayActorAppearanceToClone(Creature* clone, ReplayActorAppearanceSnapshot const* snapshot, ActorTrack const& track, bool winnerSide, ActiveReplaySession const& session)
     {
-        if (!clone || !snapshot)
-            return;
+        if (!clone)
+            return 0;
 
-        if (snapshot->nativeDisplayId)
-            clone->SetNativeDisplayId(snapshot->nativeDisplayId);
+        uint32 originalDisplay = clone->GetDisplayId();
+        char const* source = "fallback";
+        uint32 finalDisplay = 0;
 
-        uint32 effectiveDisplayId = snapshot->displayId ? snapshot->displayId : snapshot->nativeDisplayId;
-        if (effectiveDisplayId)
-            clone->SetDisplayId(effectiveDisplayId);
+        if (snapshot)
+        {
+            uint32 snapshotDisplay = snapshot->displayId ? snapshot->displayId : snapshot->nativeDisplayId;
+            if (!IsInvalidReplayCloneDisplay(snapshotDisplay, session))
+            {
+                if (snapshot->nativeDisplayId && !IsInvalidReplayCloneDisplay(snapshot->nativeDisplayId, session))
+                    clone->SetNativeDisplayId(snapshot->nativeDisplayId);
 
-        clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, snapshot->mainhandDisplayId);
-        clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, snapshot->offhandDisplayId);
-        clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, snapshot->rangedDisplayId);
+                clone->SetDisplayId(snapshotDisplay);
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, snapshot->mainhandDisplayId);
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, snapshot->offhandDisplayId);
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, snapshot->rangedDisplayId);
+                finalDisplay = snapshotDisplay;
+                source = "snapshot";
+            }
+        }
+
+        if (IsInvalidReplayCloneDisplay(finalDisplay, session))
+        {
+            finalDisplay = ResolveVisibleReplayFallbackDisplay(track, winnerSide);
+            clone->SetNativeDisplayId(finalDisplay);
+            clone->SetDisplayId(finalDisplay);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, 0);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, 0);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, 0);
+            source = snapshot ? "repair" : "fallback";
+        }
+
+        if (IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session))
+        {
+            uint32 repairedDisplay = ResolveVisibleReplayFallbackDisplay(track, winnerSide);
+            clone->SetNativeDisplayId(repairedDisplay);
+            clone->SetDisplayId(repairedDisplay);
+            LOG_WARN("server.loading", "[RTG][REPLAY][CLONE_DISPLAY_REPAIR] replay={} actorGuid={} actorName={} class={} cloneGuid={} originalDisplay={} repairedDisplay={} result={}",
+                session.replayId,
+                track.guid,
+                track.name,
+                GetClassToken(track.playerClass),
+                clone->GetGUID().GetCounter(),
+                finalDisplay,
+                clone->GetDisplayId(),
+                IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session) ? "still_invisible" : "ok");
+            source = "repair";
+        }
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][CLONE_DISPLAY] replay={} actorGuid={} actorName={} class={} cloneGuid={} originalDisplay={} finalDisplay={} source={} result={}",
+            session.replayId,
+            track.guid,
+            track.name,
+            GetClassToken(track.playerClass),
+            clone->GetGUID().GetCounter(),
+            originalDisplay,
+            clone->GetDisplayId(),
+            source,
+            IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session) ? "invisible" : "ok");
+
+        return clone->GetDisplayId();
     }
 
     static Creature* FindReplayClone(Player* viewer, ActiveReplaySession const& session, uint64 actorGuid)
@@ -1554,6 +1608,73 @@ namespace
     static uint32 GetReplayCameraAnchorEntry()
     {
         return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.CameraAnchorEntry", 98502u);
+    }
+
+    static uint32 GetHardcodedReplayFallbackDisplay()
+    {
+        return 49u;
+    }
+
+    static bool IsKnownInvisibleReplayDisplay(uint32 displayId)
+    {
+        return displayId == 0 || displayId == 11686u;
+    }
+
+    static bool IsInvalidReplayCloneDisplay(uint32 displayId, ActiveReplaySession const& session)
+    {
+        if (IsKnownInvisibleReplayDisplay(displayId))
+            return true;
+
+        return session.cameraAnchorDisplayId != 0 && displayId == session.cameraAnchorDisplayId;
+    }
+
+    static char const* GetReplayFallbackDisplayClassKey(uint8 classId)
+    {
+        switch (classId)
+        {
+            case CLASS_DRUID:
+                return "Druid";
+            case CLASS_MAGE:
+                return "Mage";
+            case CLASS_HUNTER:
+                return "Hunter";
+            case CLASS_WARRIOR:
+                return "Warrior";
+            case CLASS_SHAMAN:
+                return "Shaman";
+            case CLASS_PALADIN:
+                return "Paladin";
+            case CLASS_PRIEST:
+                return "Priest";
+            case CLASS_ROGUE:
+                return "Rogue";
+            case CLASS_WARLOCK:
+                return "Warlock";
+            case CLASS_DEATH_KNIGHT:
+                return "DeathKnight";
+            default:
+                return "Default";
+        }
+    }
+
+    static uint32 ResolveVisibleReplayFallbackDisplay(ActorTrack const& track, bool /*winnerSide*/)
+    {
+        uint32 hardcodedFallback = GetHardcodedReplayFallbackDisplay();
+        uint32 displayId = sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.FallbackDisplay.Default", hardcodedFallback);
+
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.GenericFallbackDisplayByClass", true))
+        {
+            std::string key = std::string("ArenaReplay.CloneScene.FallbackDisplay.") + GetReplayFallbackDisplayClassKey(track.playerClass);
+            displayId = sConfigMgr->GetOption<uint32>(key, displayId);
+        }
+
+        if (IsKnownInvisibleReplayDisplay(displayId))
+            displayId = hardcodedFallback;
+
+        if (IsKnownInvisibleReplayDisplay(displayId))
+            return hardcodedFallback;
+
+        return displayId;
     }
 
     static bool ReplayCameraAnchorRequired()
@@ -1780,7 +1901,18 @@ namespace
         return session.cameraAnchorFailed && (ReplayCameraAnchorRequired() || ReplayCameraFallbackMode() == 2);
     }
 
-    static Creature* SummonReplaySceneUnit(Player* viewer, uint32 entry, float x, float y, float z, float o, bool hideNameplate = false)
+    static void ApplyReplayUtilityUnitFlags(Creature* unit)
+    {
+        if (!unit)
+            return;
+
+        unit->SetReactState(REACT_PASSIVE);
+        unit->SetFaction(35);
+        unit->StopMoving();
+        unit->SetUInt32Value(UNIT_FIELD_FLAGS, unit->GetUInt32Value(UNIT_FIELD_FLAGS) | UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_PACIFIED);
+    }
+
+    static Creature* SummonReplayActorClone(Player* viewer, ActiveReplaySession const& session, uint32 entry, float x, float y, float z, float o)
     {
         if (!viewer)
             return nullptr;
@@ -1789,16 +1921,28 @@ namespace
         if (!unit)
             return nullptr;
 
-        unit->SetPhaseMask(viewer->GetPhaseMask(), true);
-        unit->SetReactState(REACT_PASSIVE);
-        unit->SetFaction(35);
+        unit->SetPhaseMask(session.replayPhaseMask ? session.replayPhaseMask : viewer->GetPhaseMask(), true);
+        ApplyReplayUtilityUnitFlags(unit);
+        unit->SetVisible(true);
+        return unit;
+    }
+
+    static Creature* SummonReplayCameraAnchor(Player* viewer, ActiveReplaySession const& session, uint32 entry, float x, float y, float z, float o)
+    {
+        if (!viewer)
+            return nullptr;
+
+        Creature* unit = viewer->SummonCreature(entry, x, y, z, o, TEMPSUMMON_MANUAL_DESPAWN, 0, nullptr, true);
+        if (!unit)
+            return nullptr;
+
+        unit->SetPhaseMask(session.replayPhaseMask ? session.replayPhaseMask : viewer->GetPhaseMask(), true);
+        ApplyReplayUtilityUnitFlags(unit);
         unit->SetCanFly(true);
         unit->SetDisableGravity(true);
         unit->SetHover(true);
-        unit->StopMoving();
-        unit->SetUInt32Value(UNIT_FIELD_FLAGS, unit->GetUInt32Value(UNIT_FIELD_FLAGS) | UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC | UNIT_FLAG_NOT_SELECTABLE | UNIT_FLAG_PACIFIED);
-        if (hideNameplate)
-            unit->SetVisible(false);
+        unit->SetUInt32Value(UNIT_FIELD_FLAGS, unit->GetUInt32Value(UNIT_FIELD_FLAGS) | UNIT_FLAG_NOT_SELECTABLE);
+        unit->SetVisible(false);
         return unit;
     }
 
@@ -1859,7 +2003,7 @@ namespace
             }
         }
 
-        Creature* anchor = SummonReplaySceneUnit(viewer, cameraEntry, x, y, z, o, true);
+        Creature* anchor = SummonReplayCameraAnchor(viewer, session, cameraEntry, x, y, z, o);
         if (!anchor)
         {
             if (!session.cameraAnchorFailureLogged || !ReplayCameraAnchorFailLogOnce())
@@ -1885,6 +2029,7 @@ namespace
         }
 
         session.cameraAnchorGuid = anchor->GetGUID();
+        session.cameraAnchorDisplayId = anchor->GetDisplayId();
         session.cameraAnchorFailed = false;
         session.cameraAnchorFailureLogged = false;
         session.nextCameraAnchorRetryMs = 0;
@@ -1978,6 +2123,7 @@ namespace
         session.cameraAnchorFailureLogged = false;
         session.nextCameraAnchorRetryMs = 0;
         session.fixedCameraFallbackApplied = false;
+        session.cameraAnchorDisplayId = 0;
     }
 
     static bool GetFirstValidActorFrame(ActorTrack const& track, ActorFrame& out)
@@ -2197,7 +2343,7 @@ namespace
 
             bool wrongPhase = session.replayPhaseMask && clone->GetPhaseMask() != session.replayPhaseMask;
             bool hidden = !clone->IsVisible();
-            bool invisibleDisplay = clone->GetDisplayId() == 0 || clone->GetDisplayId() == sConfigMgr->GetOption<uint32>("ArenaReplay.SpectatorShell.InvisibleDisplayId", 11686u);
+            bool invisibleDisplay = IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session);
             if (wrongPhase)
                 ++audit.wrongPhase;
             if (hidden)
@@ -2236,6 +2382,43 @@ namespace
             (audit.team0Bindings == audit.team0Visible && audit.team1Bindings == audit.team1Visible) ? "ok" : "warn");
 
         return audit;
+    }
+
+    static void RepairReplayCloneDisplays(Player* viewer, MatchRecord const& match, ActiveReplaySession const& session, char const* reason)
+    {
+        if (!viewer || !viewer->GetMap())
+            return;
+
+        for (ReplayCloneBinding const& binding : session.cloneBindings)
+        {
+            Creature* clone = viewer->GetMap()->GetCreature(binding.cloneGuid);
+            ActorTrack const* track = FindReplayActorTrackByGuid(match, binding.actorGuid);
+            if (!clone || !track)
+                continue;
+
+            uint32 originalDisplay = clone->GetDisplayId();
+            if (!IsInvalidReplayCloneDisplay(originalDisplay, session))
+                continue;
+
+            uint32 repairedDisplay = ResolveVisibleReplayFallbackDisplay(*track, binding.winnerSide);
+            clone->SetNativeDisplayId(repairedDisplay);
+            clone->SetDisplayId(repairedDisplay);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, 0);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, 0);
+            clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, 0);
+            clone->SetVisible(true);
+
+            LOG_WARN("server.loading", "[RTG][REPLAY][CLONE_DISPLAY_REPAIR] replay={} actorGuid={} actorName={} class={} cloneGuid={} originalDisplay={} repairedDisplay={} reason={} result={}",
+                session.replayId,
+                track->guid,
+                track->name,
+                GetClassToken(track->playerClass),
+                clone->GetGUID().GetCounter(),
+                originalDisplay,
+                clone->GetDisplayId(),
+                reason ? reason : "audit",
+                IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session) ? "still_invisible" : "ok");
+        }
     }
 
     static bool BuildReplayActorCloneScene(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
@@ -2305,6 +2488,17 @@ namespace
         std::vector<ReplayActorSelectionRef> playable = BuildPlayableReplayActorSelections(match);
         uint32 prewarmTeam0 = 0;
         uint32 prewarmTeam1 = 0;
+        if (GetReplayCloneEntry() == GetReplayCameraAnchorEntry())
+        {
+            LOG_ERROR("server.loading", "[RTG][REPLAY][CLONE_TEMPLATE_INVISIBLE] replay={} viewerGuid={} nativeMap={} replayMap={} cloneEntry={} cameraAnchorEntry={} result=same_template_for_clone_and_anchor",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                session.nativeMapId,
+                session.replayMapId,
+                GetReplayCloneEntry(),
+                GetReplayCameraAnchorEntry());
+        }
+
         for (ReplayActorSelectionRef const& ref : playable)
         {
             std::vector<ActorTrack> const* tracks = ref.winnerSide ? &match.winnerActorTracks : &match.loserActorTracks;
@@ -2329,7 +2523,7 @@ namespace
                 continue;
             }
 
-            Creature* clone = SummonReplaySceneUnit(viewer, GetReplayCloneEntry(), frame.x, frame.y, frame.z, frame.o, false);
+            Creature* clone = SummonReplayActorClone(viewer, session, GetReplayCloneEntry(), frame.x, frame.y, frame.z, frame.o);
             if (!clone)
             {
                 LOG_ERROR("server.loading", "[RTG][REPLAY][CLONE_PREWARM_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} actorGuid={} actorName={} team={} firstFrameMs={} x={} y={} z={} o={} reason=summon_failed result=fail",
@@ -2348,8 +2542,20 @@ namespace
                 continue;
             }
 
-            clone->SetPhaseMask(session.replayPhaseMask ? session.replayPhaseMask : viewer->GetPhaseMask(), true);
-            clone->SetVisible(true);
+            uint32 originalDisplay = clone->GetDisplayId();
+            if (IsInvalidReplayCloneDisplay(originalDisplay, session))
+            {
+                LOG_WARN("server.loading", "[RTG][REPLAY][CLONE_TEMPLATE_INVISIBLE] replay={} viewerGuid={} nativeMap={} replayMap={} actorGuid={} actorName={} cloneEntry={} cloneGuid={} originalDisplay={} result=force_fallback",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    track.guid,
+                    track.name,
+                    GetReplayCloneEntry(),
+                    clone->GetGUID().GetCounter(),
+                    originalDisplay);
+            }
 
             ReplayActorAppearanceSnapshot const* snapshot = FindReplayActorAppearanceSnapshot(match, track.guid);
             if (!snapshot)
@@ -2364,7 +2570,22 @@ namespace
                     ref.winnerSide ? "winner" : "loser",
                     GetClassToken(track.playerClass));
             }
-            ApplyReplayActorAppearanceToClone(clone, snapshot);
+            uint32 finalDisplay = ApplyReplayActorAppearanceToClone(clone, snapshot, track, ref.winnerSide, session);
+            if (IsInvalidReplayCloneDisplay(finalDisplay, session) && sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AbortInvisibleFallbackClones", true))
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][CLONE_PREWARM_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} actorGuid={} actorName={} team={} cloneGuid={} display={} reason=invisible_display_after_repair result=fail",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    track.guid,
+                    track.name,
+                    ref.winnerSide ? "winner" : "loser",
+                    clone->GetGUID().GetCounter(),
+                    finalDisplay);
+                clone->DespawnOrUnsummon(Milliseconds(0));
+                continue;
+            }
             session.cloneBindings.push_back({ track.guid, ref.winnerSide, clone->GetGUID() });
             if (ref.winnerSide)
                 ++prewarmTeam0;
@@ -3126,7 +3347,17 @@ namespace
         session.dsNextEventMs = 0;
     }
 
-    static void RestoreReplayViewerState(Player* player, ActiveReplaySession const& session)
+    static bool ReplayViewerHasDisableGravity(Player* player)
+    {
+        return player && player->HasUnitMovementFlag(MOVEMENTFLAG_DISABLE_GRAVITY);
+    }
+
+    static bool ReplayViewerHasHover(Player* player)
+    {
+        return player && player->HasUnitMovementFlag(MOVEMENTFLAG_HOVER);
+    }
+
+    static void ForceReplayViewerMovementRestore(Player* player)
     {
         if (!player)
             return;
@@ -3135,14 +3366,67 @@ namespace
         player->SetDisableGravity(false);
         player->SetHover(false);
         player->SetClientControl(player, true);
-        player->StopMoving();
         player->SetIsSpectator(false);
+        player->StopMoving();
+    }
+
+    static void LogReplayStateRestoreVerify(Player* player, ActiveReplaySession const& session, char const* reason, char const* result)
+    {
+        LOG_INFO("server.loading", "[RTG][REPLAY][STATE_RESTORE_VERIFY] replay={} viewerGuid={} nativeMap={} replayMap={} reason={} hidden={} canFly={} disableGravity={} hover={} clientControl=1 displayId={} phase={} result={}",
+            session.replayId,
+            player ? player->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            reason ? reason : "unknown",
+            player && !player->IsVisible() ? 1 : 0,
+            player && player->CanFly() ? 1 : 0,
+            ReplayViewerHasDisableGravity(player) ? 1 : 0,
+            ReplayViewerHasHover(player) ? 1 : 0,
+            player ? player->GetDisplayId() : 0,
+            player ? player->GetPhaseMask() : 0,
+            result ? result : "ok");
+    }
+
+    static void RestoreReplayViewerState(Player* player, ActiveReplaySession& session)
+    {
+        if (!player)
+            return;
+
+        ForceReplayViewerMovementRestore(player);
 
         if (session.invisibleDisplayApplied && sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.RestoreOnExit", true) && session.priorDisplayId != 0)
             player->SetDisplayId(session.priorDisplayId);
 
         if (session.viewerHidden || !player->IsVisible())
             player->SetVisible(true);
+
+        char const* result = "ok";
+        if (player->CanFly() || ReplayViewerHasDisableGravity(player) || ReplayViewerHasHover(player))
+        {
+            ForceReplayViewerMovementRestore(player);
+            result = (player->CanFly() || ReplayViewerHasDisableGravity(player) || ReplayViewerHasHover(player)) ? "still_flying_after_force" : "forced_again";
+            if (std::string(result) == "still_flying_after_force")
+            {
+                LOG_WARN("server.loading", "[RTG][REPLAY][STATE_RESTORE_VERIFY] replay={} viewerGuid={} nativeMap={} replayMap={} hidden={} canFly={} disableGravity={} hover={} clientControl=1 displayId={} phase={} result=still_flying_after_force",
+                    session.replayId,
+                    player->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    !player->IsVisible() ? 1 : 0,
+                    player->CanFly() ? 1 : 0,
+                    ReplayViewerHasDisableGravity(player) ? 1 : 0,
+                    ReplayViewerHasHover(player) ? 1 : 0,
+                    player->GetDisplayId(),
+                    player->GetPhaseMask());
+            }
+        }
+
+        session.movementLocked = false;
+        session.spectatorShellActive = false;
+        session.viewerHidden = false;
+        session.invisibleDisplayApplied = false;
+
+        LogReplayStateRestoreVerify(player, session, "restore_state", result);
     }
 
     static void LogReplayStateRestore(Player* player, ActiveReplaySession const& session, char const* reason, char const* result)
@@ -3195,7 +3479,10 @@ namespace
         RestoreReplayViewerPhase(player, session);
 
         if (returnToAnchor)
+        {
             ReturnReplayViewerToAnchor(player, session);
+            RestoreReplayViewerState(player, session);
+        }
 
         session.hudStarted = false;
         session.lastHudActorGuid = 0;
@@ -3662,6 +3949,7 @@ namespace
         session.cameraAnchorFailureLogged = false;
         session.nextCameraAnchorRetryMs = 0;
         session.fixedCameraFallbackApplied = false;
+        session.cameraAnchorDisplayId = 0;
         session.spectatorShellActive = false;
         session.nativeMapId = 0;
         session.replayMapId = 0;
@@ -4009,6 +4297,7 @@ public:
                 CancelReplayStartup(replayer, session, "camera_anchor_failed");
                 return;
             }
+            RepairReplayCloneDisplays(replayer, match, session, "post_camera_anchor");
             ReplayCloneVisibilityAudit audit = AuditReplayCloneVisibility(replayer, match, session);
             LOG_INFO("server.loading", "[RTG][REPLAY][SCENE_READY] replay={} nativeMap={} replayMap={} objectsSpawned={} gatesState={} clonesPrewarmed={} team0Visible={} team1Visible={} cameraAnchorBound={} viewerBodyHidden={} result={}",
                 session.replayId,
@@ -5497,6 +5786,7 @@ namespace
                     CancelReplayStartup(replayer, session, "camera_anchor_failed");
                     continue;
                 }
+                RepairReplayCloneDisplays(replayer, match, session, "post_camera_anchor");
                 ReplayCloneVisibilityAudit audit = AuditReplayCloneVisibility(replayer, match, session);
                 LOG_INFO("server.loading", "[RTG][REPLAY][SCENE_READY] replay={} nativeMap={} replayMap={} objectsSpawned={} gatesState={} clonesPrewarmed={} team0Visible={} team1Visible={} cameraAnchorBound={} viewerBodyHidden={} result={}",
                     session.replayId,
