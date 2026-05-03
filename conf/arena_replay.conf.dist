@@ -420,22 +420,23 @@ ArenaReplay.Playback.PacketBudgetPerUpdate = 40
 #                     Change this only if your realm uses a dedicated replay
 #                     surrogate creature template for actor bodies.
 #
-#        Default:     91012
+#        Default:     98501
 #
 #        Example:     ArenaReplay.CloneScene.CloneEntry = 98501
-#                     Replay actor surrogates are spawned from creature 91012.
+#                     Replay actor surrogates are spawned from creature 98501.
 #
 #    ArenaReplay.CloneScene.CameraAnchorEntry
 #        Description: Creature entry used for the hidden replay camera anchor.
 #
-#                     By default this reuses the clone entry. Set a dedicated
-#                     entry only if you want a separate invisible/utility camera
-#                     anchor creature template.
+#                     This is spawned only after replay map attach succeeds and
+#                     actor clones are ready. If the template is missing or the
+#                     summon fails, replay startup falls back to no-viewpoint
+#                     mode without affecting the copied-map teleport result.
 #
-#        Default:     91012
+#        Default:     98502
 #
-#        Example:     ArenaReplay.CloneScene.CameraAnchorEntry = 18793
-#                     The replay camera anchor uses creature 91012.
+#        Example:     ArenaReplay.CloneScene.CameraAnchorEntry = 98502
+#                     The replay camera anchor uses creature 98502.
 #
 #    ArenaReplay.CloneScene.SyncMs
 #        Description: Interval, in milliseconds, used when synchronizing replay
@@ -452,7 +453,7 @@ ArenaReplay.Playback.PacketBudgetPerUpdate = 40
 ArenaReplay.CloneScene.Enable = 1
 ArenaReplay.CloneScene.UseViewpoint = 1
 ArenaReplay.CloneScene.CloneEntry = 98501
-ArenaReplay.CloneScene.CameraAnchorEntry = 18793
+ArenaReplay.CloneScene.CameraAnchorEntry = 98502
 ArenaReplay.CloneScene.SyncMs = 50
 
 ########################################
@@ -739,9 +740,9 @@ ArenaReplay.DynamicObjects.RingOfValor.PillarSwitchMs = 25000
 #        Description: Lowest phase bit that can be allocated to a replay viewer
 #                     during clone-scene playback. Replay playback does not
 #                     create or register a live BattlegroundMgr match. Instead,
-#                     the viewer is teleported directly to the recorded map and
-#                     placed into a private phase so multiple replay viewers do
-#                     not see each other or each other's clone scenes.
+#                     the viewer is teleported directly to the copied replay map
+#                     and placed into a private phase after the transfer is
+#                     accepted so replay objects and clone scenes remain private.
 #
 #                     Bit 0 is the normal world phase and should stay reserved.
 #                     Keep this at 1 unless your realm already uses phase bit 1
@@ -766,9 +767,88 @@ ArenaReplay.DynamicObjects.RingOfValor.PillarSwitchMs = 25000
 #                     Allows up to 30 concurrent private replay viewers when
 #                     paired with PrivatePhaseMinBit = 1.
 #
+#    ArenaReplay.Sandbox.ApplyPhaseBeforeTeleport
+#        Description: Controls whether the replay-private phase is applied
+#                     before attempting the copied-map transfer.
+#
+#                     Copied replay maps should not need pre-transfer phasing,
+#                     so the default leaves the viewer in their original phase
+#                     until Player::TeleportTo reports success. Enable only if
+#                     a specific core branch requires pre-phasing before map
+#                     transfer.
+#
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#
+#        Example:     ArenaReplay.Sandbox.ApplyPhaseBeforeTeleport = 0
+#                     Attempts copied-map teleport first, then applies replay
+#                     private phase only after the transfer was accepted.
+#
 
 ArenaReplay.Sandbox.PrivatePhaseMinBit = 1
 ArenaReplay.Sandbox.PrivatePhaseMaxBit = 30
+ArenaReplay.Sandbox.ApplyPhaseBeforeTeleport = 0
+
+########################################
+# ArenaReplay Return Fallback
+########################################
+#
+#    ArenaReplay.Return.UseFallbackWhenAnchorIsReplayMap
+#        Description: Uses the configured safe fallback position when a replay
+#                     viewer's saved return anchor is itself one of the copied
+#                     replay maps.
+#
+#                     This prevents failed startup or teardown from returning a
+#                     viewer back into replay-only copied map space.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.Return.UseFallbackWhenAnchorIsReplayMap = 1
+#                     Copied replay map anchors use the safe fallback location.
+#
+#    ArenaReplay.Return.SafeFallbackMap
+#        Description: Map id used by the replay return fallback.
+#
+#        Default:     1
+#
+#        Example:     ArenaReplay.Return.SafeFallbackMap = 1
+#                     Uses Kalimdor as the safe fallback map.
+#
+#    ArenaReplay.Return.SafeFallbackX
+#        Description: X coordinate used by the replay return fallback.
+#
+#        Default:     1629.85
+#
+#        Example:     ArenaReplay.Return.SafeFallbackX = 1629.85
+#
+#    ArenaReplay.Return.SafeFallbackY
+#        Description: Y coordinate used by the replay return fallback.
+#
+#        Default:     -4373.64
+#
+#        Example:     ArenaReplay.Return.SafeFallbackY = -4373.64
+#
+#    ArenaReplay.Return.SafeFallbackZ
+#        Description: Z coordinate used by the replay return fallback.
+#
+#        Default:     31.5573
+#
+#        Example:     ArenaReplay.Return.SafeFallbackZ = 31.5573
+#
+#    ArenaReplay.Return.SafeFallbackO
+#        Description: Orientation used by the replay return fallback.
+#
+#        Default:     3.69762
+#
+#        Example:     ArenaReplay.Return.SafeFallbackO = 3.69762
+#
+ArenaReplay.Return.UseFallbackWhenAnchorIsReplayMap = 1
+ArenaReplay.Return.SafeFallbackMap = 1
+ArenaReplay.Return.SafeFallbackX = 1629.85
+ArenaReplay.Return.SafeFallbackY = -4373.64
+ArenaReplay.Return.SafeFallbackZ = 31.5573
+ArenaReplay.Return.SafeFallbackO = 3.69762
 
 ########################################
 # ArenaReplay Spectator Restrictions

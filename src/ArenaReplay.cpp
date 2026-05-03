@@ -283,11 +283,13 @@ namespace
     static bool ReplayDynamicObjectsDebugEnabled();
     static uint32 ResolveReplayMapId(uint32 nativeMapId);
     static uint32 AllocateReplayPrivatePhaseMask(uint64 viewerKey);
+    static bool ApplyReplayViewerPrivatePhase(Player* viewer, ActiveReplaySession& session);
     static bool PrepareReplayMapSandbox(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void RestoreReplayViewerPhase(Player* player, ActiveReplaySession const& session);
     static bool InitializeReplayDynamicObjects(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void UpdateReplayDynamicObjects(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void DespawnReplayDynamicObjects(Player* viewer, ActiveReplaySession& session);
+    static void CancelReplayStartup(Player* player, ActiveReplaySession& session, char const* reason);
     static uint32 GetReplayNowMs();
     static void ProcessReplaySandboxSessions(uint32 diff);
 
@@ -741,7 +743,7 @@ namespace
             return;
 
         std::string reason;
-        if (body != "END" && !EvaluateReplayHudAllowance(player, &reason))
+        if (body != "END" && body != "STARTUP_CANCEL" && !EvaluateReplayHudAllowance(player, &reason))
         {
             if (ReplayDebugEnabled(ReplayDebugFlag::Hud) && ReplayDebugVerbose())
             {
@@ -1093,16 +1095,35 @@ namespace
         SendReplayHudMessage(player, "END");
     }
 
+    static bool IsCopiedReplayMapId(uint32 mapId)
+    {
+        return mapId == 725 || mapId == 726 || mapId == 727 || mapId == 728 || mapId == 729;
+    }
+
     static void ReturnReplayViewerToAnchor(Player* player, ActiveReplaySession const& session)
     {
-        if (!player || session.anchorMapId == 0)
+        if (!player)
             return;
 
-        player->TeleportTo(session.anchorMapId,
-            session.anchorPosition.GetPositionX(),
-            session.anchorPosition.GetPositionY(),
-            session.anchorPosition.GetPositionZ(),
-            session.anchorPosition.GetOrientation());
+        uint32 anchorMap = session.anchorMapId;
+        float x = session.anchorPosition.GetPositionX();
+        float y = session.anchorPosition.GetPositionY();
+        float z = session.anchorPosition.GetPositionZ();
+        float o = session.anchorPosition.GetOrientation();
+
+        if (anchorMap == 0)
+            return;
+
+        if (IsCopiedReplayMapId(anchorMap) && sConfigMgr->GetOption<bool>("ArenaReplay.Return.UseFallbackWhenAnchorIsReplayMap", true))
+        {
+            anchorMap = sConfigMgr->GetOption<uint32>("ArenaReplay.Return.SafeFallbackMap", 1u);
+            x = sConfigMgr->GetOption<float>("ArenaReplay.Return.SafeFallbackX", 1629.85f);
+            y = sConfigMgr->GetOption<float>("ArenaReplay.Return.SafeFallbackY", -4373.64f);
+            z = sConfigMgr->GetOption<float>("ArenaReplay.Return.SafeFallbackZ", 31.5573f);
+            o = sConfigMgr->GetOption<float>("ArenaReplay.Return.SafeFallbackO", 3.69762f);
+        }
+
+        player->TeleportTo(anchorMap, x, y, z, o);
     }
 
     static uint32 GetReplayNowMs()
@@ -1166,6 +1187,24 @@ namespace
         return 0;
     }
 
+    static bool ApplyReplayViewerPrivatePhase(Player* viewer, ActiveReplaySession& session)
+    {
+        if (!viewer)
+            return false;
+
+        if (session.replayPhaseMask == 0)
+            session.replayPhaseMask = AllocateReplayPrivatePhaseMask(viewer->GetGUID().GetCounter());
+
+        if (session.replayPhaseMask == 0)
+            return false;
+
+        if (!session.replayPhaseApplied || viewer->GetPhaseMask() != session.replayPhaseMask)
+            viewer->SetPhaseMask(session.replayPhaseMask, true);
+
+        session.replayPhaseApplied = true;
+        return true;
+    }
+
     static bool PrepareReplayMapSandbox(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
     {
         if (!viewer || match.mapId == 0)
@@ -1189,8 +1228,10 @@ namespace
         if (session.replayPhaseMask == 0)
             return false;
 
-        viewer->SetPhaseMask(session.replayPhaseMask, true);
-        session.replayPhaseApplied = true;
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.Sandbox.ApplyPhaseBeforeTeleport", false) &&
+            !ApplyReplayViewerPrivatePhase(viewer, session))
+            return false;
+
         LOG_INFO("server.loading", "[RTG][REPLAY][MAP_RESOLVE] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} result=ok",
             session.replayId, viewer->GetGUID().GetCounter(), session.nativeMapId, session.replayMapId, session.replayPhaseMask);
         return true;
@@ -1404,7 +1445,7 @@ namespace
 
     static uint32 GetReplayCameraAnchorEntry()
     {
-        return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.CameraAnchorEntry", 18793u);
+        return sConfigMgr->GetOption<uint32>("ArenaReplay.CloneScene.CameraAnchorEntry", 98502u);
     }
 
     static Creature* SummonReplaySceneUnit(Player* viewer, uint32 entry, float x, float y, float z, float o, bool hideNameplate = false)
@@ -1457,7 +1498,20 @@ namespace
 
         Creature* anchor = SummonReplaySceneUnit(viewer, GetReplayCameraAnchorEntry(), x, y, z, o, true);
         if (!anchor)
+        {
+            LOG_ERROR("server.loading", "[RTG][REPLAY][CAMERA_ANCHOR_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} entry={} x={} y={} z={} o={} result=summon_failed",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                session.nativeMapId,
+                session.replayMapId,
+                session.replayPhaseMask,
+                GetReplayCameraAnchorEntry(),
+                x,
+                y,
+                z,
+                o);
             return nullptr;
+        }
 
         session.cameraAnchorGuid = anchor->GetGUID();
         return anchor;
@@ -2259,6 +2313,71 @@ namespace
             player->SetVisible(true);
     }
 
+    static void LogReplayStateRestore(Player* player, ActiveReplaySession const& session, char const* reason, char const* result)
+    {
+        LOG_INFO("server.loading", "[RTG][REPLAY][STATE_RESTORE] replay={} viewerGuid={} nativeMap={} replayMap={} reason={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} hidden={} canFly={} result={}",
+            session.replayId,
+            player ? player->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            reason ? reason : "unknown",
+            player ? player->GetMapId() : 0,
+            player ? player->GetBattlegroundId() : 0,
+            session.battlegroundInstanceId,
+            player && player->InBattleground() ? 1 : 0,
+            player ? player->GetPhaseMask() : 0,
+            session.replayPhaseMask,
+            player && !player->IsVisible() ? 1 : 0,
+            player && player->CanFly() ? 1 : 0,
+            result ? result : "ok");
+    }
+
+    static void CancelReplayStartup(Player* player, ActiveReplaySession& session, char const* reason)
+    {
+        if (!player)
+            return;
+
+        uint64 viewerKey = player->GetGUID().GetCounter();
+        bool returnToAnchor = session.sandboxTeleportIssued && session.anchorMapId != 0 && player->GetMapId() == session.replayMapId;
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][STARTUP_CANCEL] replay={} viewerGuid={} nativeMap={} replayMap={} reason={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} dynamicObjects={} clones={} cameraAnchor={} result=begin",
+            session.replayId,
+            viewerKey,
+            session.nativeMapId,
+            session.replayMapId,
+            reason ? reason : "unknown",
+            player->GetMapId(),
+            player->GetBattlegroundId(),
+            session.battlegroundInstanceId,
+            player->InBattleground() ? 1 : 0,
+            player->GetPhaseMask(),
+            session.replayPhaseMask,
+            session.dynamicObjects.size(),
+            session.cloneBindings.size(),
+            session.cameraAnchorGuid ? 1 : 0);
+
+        SendReplayHudMessage(player, "STARTUP_CANCEL");
+        DespawnReplayDynamicObjects(player, session);
+        DespawnReplayActorClones(player, session);
+        RestoreReplayViewerState(player, session);
+        RestoreReplayViewerPhase(player, session);
+
+        if (returnToAnchor)
+            ReturnReplayViewerToAnchor(player, session);
+
+        session.hudStarted = false;
+        session.lastHudActorGuid = 0;
+        session.lastHudActorFlatIndex = 0;
+        session.lastHudActorCount = 0;
+        session.lastHudWatcherCount = 0;
+        session.lastHudWatcherPayload.clear();
+        session.nextHudWatcherSyncMs = 0;
+        LogReplayStateRestore(player, session, reason, "startup_cancel");
+
+        activeReplaySessions.erase(viewerKey);
+        loadedReplays.erase(viewerKey);
+    }
+
     static bool ShouldPreferBattlegroundLeave(ActiveReplaySession const& session)
     {
         return session.battlegroundInstanceId != 0 && session.priorBattlegroundInstanceId != session.battlegroundInstanceId;
@@ -2354,9 +2473,9 @@ namespace
         auto liveIt = activeReplaySessions.find(viewerKey);
         if (liveIt != activeReplaySessions.end())
         {
-            ResetActorReplayView(player, liveIt->second);
             DespawnReplayDynamicObjects(player, liveIt->second);
             DespawnReplayActorClones(player, liveIt->second);
+            ResetActorReplayView(player, liveIt->second);
         }
 
         RestoreReplayViewerState(player, session);
@@ -2370,6 +2489,7 @@ namespace
             action = "restore_only";
 
         RestoreReplayViewerState(player, session);
+        LogReplayStateRestore(player, session, session.lastTeardownReason.c_str(), "teardown");
 
         if (ReplayDebugEnabled(ReplayDebugFlag::Teardown))
         {
@@ -2409,11 +2529,12 @@ namespace
         auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
         if (it != activeReplaySessions.end())
         {
-            ResetActorReplayView(player, it->second);
             DespawnReplayDynamicObjects(player, it->second);
             DespawnReplayActorClones(player, it->second);
+            ResetActorReplayView(player, it->second);
             RestoreReplayViewerState(player, it->second);
             RestoreReplayViewerPhase(player, it->second);
+            LogReplayStateRestore(player, it->second, "release_control", "release");
         }
         else
         {
@@ -2560,16 +2681,19 @@ namespace
                 replayer->SetFacingTo(currentO + diffO * orientationLerpPct);
         }
 
-        if (Creature* anchor = EnsureReplayCameraAnchor(replayer, match, session))
+        if (session.viewpointBound || session.cameraAnchorGuid)
         {
-            float adx = anchor->GetPositionX() - targetX;
-            float ady = anchor->GetPositionY() - targetY;
-            float adz = anchor->GetPositionZ() - targetZ;
-            float anchorDistSq = adx * adx + ady * ady + adz * adz;
-            if (forceImmediate || anchorDistSq > (snapDistance * snapDistance) || actorChanged)
-                anchor->NearTeleportTo(targetX, targetY, targetZ, targetO);
-            else
-                anchor->SetFacingTo(targetO);
+            if (Creature* anchor = EnsureReplayCameraAnchor(replayer, match, session))
+            {
+                float adx = anchor->GetPositionX() - targetX;
+                float ady = anchor->GetPositionY() - targetY;
+                float adz = anchor->GetPositionZ() - targetZ;
+                float anchorDistSq = adx * adx + ady * ady + adz * adz;
+                if (forceImmediate || anchorDistSq > (snapDistance * snapDistance) || actorChanged)
+                    anchor->NearTeleportTo(targetX, targetY, targetZ, targetO);
+                else
+                    anchor->SetFacingTo(targetO);
+            }
         }
 
         session.lastCameraX = targetX;
@@ -2686,6 +2810,13 @@ namespace
                << " anchorZ=" << session.anchorPosition.GetPositionZ();
             ReplayLog(ReplayDebugFlag::General, &session, player, "LOCK", ss.str());
         }
+
+    }
+
+    static void ActivateReplayViewerControl(Player* player, ActiveReplaySession& session)
+    {
+        if (!player)
+            return;
 
         player->SetIsSpectator(true);
 
@@ -2827,7 +2958,7 @@ public:
 
         ActiveReplaySession& session = sessionIt->second;
 
-        if (session.awaitingReplayMapAttach || !session.replayMapAttached)
+        if (session.awaitingReplayMapAttach)
         {
             if (session.replayAttachDeadlineMs == 0)
                 session.replayAttachDeadlineMs = bg->GetStartTime() + 5000;
@@ -2855,18 +2986,19 @@ public:
 
                 if (bg->GetStartTime() >= session.replayAttachDeadlineMs)
                 {
-                    if (ReplayDebugEnabled(ReplayDebugFlag::Teardown))
-                    {
-                        std::ostringstream ss;
-                        ss << "playerMap=" << replayer->GetMapId()
-                           << " replayMap=" << session.replayMapId
-                           << " playerBg=" << replayer->GetBattlegroundId()
-                           << " sessionBg=" << session.battlegroundInstanceId
-                           << " inBattleground=" << (replayer->InBattleground() ? 1 : 0)
-                           << " nowMs=" << bg->GetStartTime();
-                        ReplayLog(ReplayDebugFlag::Teardown, &session, replayer, "ATTACH_TIMEOUT", ss.str());
-                    }
-                    RequestReplayTeardown(replayer, bg, "attach_timeout", 0);
+                    LOG_INFO("server.loading", "[RTG][REPLAY][ATTACH_TIMEOUT] replay={} viewerGuid={} nativeMap={} replayMap={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} nowMs={} result=timeout",
+                        session.replayId,
+                        replayer->GetGUID().GetCounter(),
+                        session.nativeMapId,
+                        session.replayMapId,
+                        replayer->GetMapId(),
+                        replayer->GetBattlegroundId(),
+                        session.battlegroundInstanceId,
+                        replayer->InBattleground() ? 1 : 0,
+                        replayer->GetPhaseMask(),
+                        session.replayPhaseMask,
+                        bg->GetStartTime());
+                    CancelReplayStartup(replayer, session, "attach_timeout");
                 }
                 return;
             }
@@ -2902,13 +3034,27 @@ public:
                     replayer->GetPhaseMask(),
                     session.replayPhaseMask);
             }
+            else
+            {
+                LOG_INFO("server.loading", "[RTG][REPLAY][ATTACH_OK] replay={} viewerGuid={} nativeMap={} playerMap={} replayMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} result=ok",
+                    session.replayId,
+                    replayer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    replayer->GetMapId(),
+                    session.replayMapId,
+                    replayer->GetBattlegroundId(),
+                    session.battlegroundInstanceId,
+                    replayer->InBattleground() ? 1 : 0,
+                    replayer->GetPhaseMask(),
+                    session.replayPhaseMask);
+            }
 
             if (!InitializeReplayDynamicObjects(replayer, match, session))
             {
                 DespawnReplayDynamicObjects(replayer, session);
                 if (replayer->GetSession())
                     ChatHandler(replayer->GetSession()).PSendSysMessage("Replay arena objects could not be spawned.");
-                RequestReplayTeardown(replayer, bg, "dynamic_object_spawn_failed", 0);
+                CancelReplayStartup(replayer, session, "dynamic_object_spawn_failed");
                 return;
             }
 
@@ -2924,17 +3070,18 @@ public:
             if (!clonesOk && sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.Enable", true))
             {
                 DespawnReplayDynamicObjects(replayer, session);
-                RequestReplayTeardown(replayer, bg, "clone_scene_failed", 0);
+                CancelReplayStartup(replayer, session, "clone_scene_failed");
                 return;
             }
 
-            EnsureReplayCameraAnchor(replayer, match, session);
             BindReplayViewpoint(replayer, match, session);
             ApplyActorReplayView(replayer, match, session, bg->GetStartTime(), true);
             SendReplayHudPov(replayer, match, session, true);
             session.nextHudWatcherSyncMs = 0;
             SendReplayHudWatchers(bg, replayer, match, session, true);
         }
+        if (!session.replayMapAttached)
+            return;
 
         // send replay data to spectator first so actors exist client-side before camera positioning,
         // but cap burst size to avoid hitching and client overload on older replays.
@@ -3957,10 +4104,7 @@ private:
         if (!PrepareReplayMapSandbox(player, record, replaySession))
         {
             bool mapResolveFailed = replaySession.nativeMapId != 0 && replaySession.replayMapId == 0;
-            RestoreReplayViewerState(player, replaySession);
-            RestoreReplayViewerPhase(player, replaySession);
-            activeReplaySessions.erase(player->GetGUID().GetCounter());
-            loadedReplays.erase(player->GetGUID().GetCounter());
+            CancelReplayStartup(player, replaySession, mapResolveFailed ? "map_resolve_fail" : "sandbox_prepare_fail");
             if (!mapResolveFailed)
                 handler.PSendSysMessage("Replay sandbox could not allocate a private viewer phase or target replay map.");
             return false;
@@ -3972,14 +4116,6 @@ private:
         replaySession.actorTrackIndex = 0;
         replaySession.nextActorTeleportMs = 0;
         replaySession.replaySpawnPosition.Relocate(bootstrapFrame.x, bootstrapFrame.y, bootstrapFrame.z + 2.0f, bootstrapFrame.o);
-        replaySession.sandboxTeleportIssued = true;
-        replaySession.awaitingReplayMapAttach = true;
-        replaySession.replayMapAttached = false;
-        replaySession.replayAttachDeadlineMs = GetReplayNowMs() + 5000;
-        replaySession.nextAttachLogMs = 0;
-        replaySession.replayPlaybackMs = 0;
-        replaySession.replayLastServerMs = GetReplayNowMs();
-        replaySession.replayWarmupUntilMs = 1000;
 
         if (viewerWasParticipant && sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.StartOnSelfWhenParticipant", true))
         {
@@ -4012,11 +4148,75 @@ private:
             }
         }
 
-        player->TeleportTo(replaySession.replayMapId,
-            replaySession.replaySpawnPosition.GetPositionX(),
-            replaySession.replaySpawnPosition.GetPositionY(),
-            replaySession.replaySpawnPosition.GetPositionZ(),
-            replaySession.replaySpawnPosition.GetOrientation());
+        uint32 playerMapBefore = player->GetMapId();
+        uint32 playerPhaseBefore = player->GetPhaseMask();
+        float spawnX = replaySession.replaySpawnPosition.GetPositionX();
+        float spawnY = replaySession.replaySpawnPosition.GetPositionY();
+        float spawnZ = replaySession.replaySpawnPosition.GetPositionZ();
+        float spawnO = replaySession.replaySpawnPosition.GetOrientation();
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][TELEPORT_ATTEMPT] replay={} viewerGuid={} nativeMap={} replayMap={} x={} y={} z={} o={} playerMapBefore={} playerPhaseBefore={} result=begin",
+            replaySession.replayId,
+            player->GetGUID().GetCounter(),
+            replaySession.nativeMapId,
+            replaySession.replayMapId,
+            spawnX,
+            spawnY,
+            spawnZ,
+            spawnO,
+            playerMapBefore,
+            playerPhaseBefore);
+
+        bool teleportOk = player->TeleportTo(replaySession.replayMapId, spawnX, spawnY, spawnZ, spawnO);
+        uint32 playerPhaseAfter = player->GetPhaseMask();
+        if (!teleportOk)
+        {
+            LOG_ERROR("server.loading", "[RTG][REPLAY][TELEPORT_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} x={} y={} z={} o={} playerMapBefore={} playerPhaseBefore={} playerPhaseAfter={} result=failed",
+                replaySession.replayId,
+                player->GetGUID().GetCounter(),
+                replaySession.nativeMapId,
+                replaySession.replayMapId,
+                spawnX,
+                spawnY,
+                spawnZ,
+                spawnO,
+                playerMapBefore,
+                playerPhaseBefore,
+                playerPhaseAfter);
+            CancelReplayStartup(player, replaySession, "teleport_fail");
+            handler.PSendSysMessage("Replay map could not be entered. Replay startup was cancelled.");
+            return false;
+        }
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][TELEPORT_OK] replay={} viewerGuid={} nativeMap={} replayMap={} x={} y={} z={} o={} mapBefore={} phase={} result=ok",
+            replaySession.replayId,
+            player->GetGUID().GetCounter(),
+            replaySession.nativeMapId,
+            replaySession.replayMapId,
+            spawnX,
+            spawnY,
+            spawnZ,
+            spawnO,
+            playerMapBefore,
+            playerPhaseAfter);
+
+        replaySession.sandboxTeleportIssued = true;
+
+        if (!ApplyReplayViewerPrivatePhase(player, replaySession))
+        {
+            CancelReplayStartup(player, replaySession, "phase_apply_failed");
+            handler.PSendSysMessage("Replay sandbox could not allocate a private viewer phase or target replay map.");
+            return false;
+        }
+
+        ActivateReplayViewerControl(player, replaySession);
+        replaySession.awaitingReplayMapAttach = true;
+        replaySession.replayMapAttached = false;
+        replaySession.replayAttachDeadlineMs = GetReplayNowMs() + 5000;
+        replaySession.nextAttachLogMs = 0;
+        replaySession.replayPlaybackMs = 0;
+        replaySession.replayLastServerMs = GetReplayNowMs();
+        replaySession.replayWarmupUntilMs = 1000;
 
         if (ReplayDebugEnabled(ReplayDebugFlag::General))
         {
@@ -4200,6 +4400,12 @@ namespace
             auto matchIt = loadedReplays.find(viewerKey);
             if (matchIt == loadedReplays.end())
             {
+                if (!session.replayMapAttached)
+                {
+                    CancelReplayStartup(replayer, session, "missing_loaded_replay");
+                    continue;
+                }
+
                 RequestReplayTeardown(replayer, nullptr, "missing_loaded_replay", 0);
                 if (session.teardownRequested)
                     PerformReplayTeardown(replayer, nullptr);
@@ -4213,7 +4419,7 @@ namespace
                 deltaMs = std::min<uint32>(250u, nowMs - session.replayLastServerMs);
             session.replayLastServerMs = nowMs;
 
-            if (session.awaitingReplayMapAttach || !session.replayMapAttached)
+            if (session.awaitingReplayMapAttach)
             {
                 if (!IsReplayViewerMapAttached(replayer, nullptr, session))
                 {
@@ -4237,20 +4443,20 @@ namespace
 
                     if (session.replayAttachDeadlineMs != 0 && nowMs >= session.replayAttachDeadlineMs)
                     {
-                        if (ReplayDebugEnabled(ReplayDebugFlag::Teardown))
-                        {
-                            std::ostringstream ss;
-                            ss << "playerMap=" << replayer->GetMapId()
-                               << " replayMap=" << session.replayMapId
-                               << " playerBg=" << replayer->GetBattlegroundId()
-                               << " sessionBg=" << session.battlegroundInstanceId
-                               << " inBattleground=" << (replayer->InBattleground() ? 1 : 0)
-                               << " playerPhase=" << replayer->GetPhaseMask()
-                               << " replayPhase=" << session.replayPhaseMask
-                               << " nowMs=" << nowMs;
-                            ReplayLog(ReplayDebugFlag::Teardown, &session, replayer, "ATTACH_TIMEOUT", ss.str());
-                        }
-                        RequestReplayTeardown(replayer, nullptr, "attach_timeout", 0);
+                        LOG_INFO("server.loading", "[RTG][REPLAY][ATTACH_TIMEOUT] replay={} viewerGuid={} nativeMap={} replayMap={} playerMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} nowMs={} result=timeout",
+                            session.replayId,
+                            replayer->GetGUID().GetCounter(),
+                            session.nativeMapId,
+                            session.replayMapId,
+                            replayer->GetMapId(),
+                            replayer->GetBattlegroundId(),
+                            session.battlegroundInstanceId,
+                            replayer->InBattleground() ? 1 : 0,
+                            replayer->GetPhaseMask(),
+                            session.replayPhaseMask,
+                            nowMs);
+                        CancelReplayStartup(replayer, session, "attach_timeout");
+                        continue;
                     }
 
                     if (session.teardownRequested && nowMs >= session.teardownExecuteAtMs)
@@ -4293,15 +4499,27 @@ namespace
                         replayer->GetPhaseMask(),
                         session.replayPhaseMask);
                 }
+                else
+                {
+                    LOG_INFO("server.loading", "[RTG][REPLAY][ATTACH_OK] replay={} viewerGuid={} nativeMap={} playerMap={} replayMap={} playerBg={} sessionBg={} inBattleground={} playerPhase={} replayPhase={} result=ok",
+                        session.replayId,
+                        replayer->GetGUID().GetCounter(),
+                        session.nativeMapId,
+                        replayer->GetMapId(),
+                        session.replayMapId,
+                        replayer->GetBattlegroundId(),
+                        session.battlegroundInstanceId,
+                        replayer->InBattleground() ? 1 : 0,
+                        replayer->GetPhaseMask(),
+                        session.replayPhaseMask);
+                }
 
                 if (!InitializeReplayDynamicObjects(replayer, match, session))
                 {
                     DespawnReplayDynamicObjects(replayer, session);
                     if (replayer->GetSession())
                         ChatHandler(replayer->GetSession()).PSendSysMessage("Replay arena objects could not be spawned.");
-                    RequestReplayTeardown(replayer, nullptr, "dynamic_object_spawn_failed", 0);
-                    if (session.teardownRequested)
-                        PerformReplayTeardown(replayer, nullptr);
+                    CancelReplayStartup(replayer, session, "dynamic_object_spawn_failed");
                     continue;
                 }
 
@@ -4317,19 +4535,18 @@ namespace
                 if (!clonesOk && sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.Enable", true))
                 {
                     DespawnReplayDynamicObjects(replayer, session);
-                    RequestReplayTeardown(replayer, nullptr, "clone_scene_failed", 0);
-                    if (session.teardownRequested)
-                        PerformReplayTeardown(replayer, nullptr);
+                    CancelReplayStartup(replayer, session, "clone_scene_failed");
                     continue;
                 }
 
-                EnsureReplayCameraAnchor(replayer, match, session);
                 BindReplayViewpoint(replayer, match, session);
                 ApplyActorReplayView(replayer, match, session, session.replayPlaybackMs, true);
                 SendReplayHudPov(replayer, match, session, true);
                 session.nextHudWatcherSyncMs = 0;
                 SendReplayHudWatchers(nullptr, replayer, match, session, true);
             }
+            if (!session.replayMapAttached)
+                continue;
 
             session.replayPlaybackMs += deltaMs;
 
