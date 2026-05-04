@@ -104,7 +104,13 @@ SMSG_PLAY_SPELL_VISUAL
 CMSG_ATTACKSWING
 CMSG_ATTACKSTOP*/
 
-struct PacketRecord { uint32 timestamp; WorldPacket packet; };
+struct PacketRecord
+{
+    uint32 timestamp = 0;
+    WorldPacket packet;
+    ObjectGuid receiverGuid;
+    TeamId receiverTeam = TeamId(2);
+};
 struct ActorFrame
 {
     uint32 timestamp = 0;
@@ -169,6 +175,10 @@ struct MatchRecord
     uint8 arenaTypeId;
     uint32 mapId;
     std::deque<PacketRecord> packets;
+    uint32 team0PacketCount = 0;
+    uint32 team1PacketCount = 0;
+    uint32 neutralPacketCount = 0;
+    uint32 skippedPacketCount = 0;
     std::vector<uint64> winnerPlayerGuidList;
     std::vector<uint64> loserPlayerGuidList;
     std::vector<ActorTrack> winnerActorTracks;
@@ -300,6 +310,8 @@ struct ActiveReplaySession
     uint32 cameraStallCount = 0;
     uint32 priorDisplayId = 0;
     bool invisibleDisplayApplied = false;
+    uint32 priorVirtualItemSlot[3] = { 0, 0, 0 };
+    bool virtualItemsStripped = false;
     float lastCameraX = 0.0f;
     float lastCameraY = 0.0f;
     float lastCameraZ = 0.0f;
@@ -355,6 +367,8 @@ namespace
     static void UpdateReplayDynamicObjects(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
     static void DespawnReplayDynamicObjects(Player* viewer, ActiveReplaySession& session);
     static void CancelReplayStartup(Player* player, ActiveReplaySession& session, char const* reason);
+    static void StripReplayViewerVisualEquipment(Player* player, ActiveReplaySession& session);
+    static void RestoreReplayViewerVisualEquipment(Player* player, ActiveReplaySession& session);
     static uint32 SecondsToMs(uint32 seconds);
     static uint32 GetReplayNowMs();
     static void ProcessReplaySandboxSessions(uint32 diff);
@@ -1145,6 +1159,11 @@ namespace
             default:
                 break;
         }
+
+        if (ReplayRecordedPacketVisualBackendEnabled() &&
+            opcode == SMSG_DESTROY_OBJECT &&
+            sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets", true))
+            return false;
 
         if (ReplayCloneModeEnabled() && !ReplayCloneModeSendRecordedWorldPackets())
         {
@@ -2830,6 +2849,8 @@ namespace
             session.invisibleDisplayApplied = true;
         }
 
+        StripReplayViewerVisualEquipment(viewer, session);
+
         if (!sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.MoveBodyToHoldingPoint", true))
             return;
 
@@ -3466,6 +3487,22 @@ namespace
 
         if (visualBackend == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM)
         {
+            bool requirePackets = sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets", true);
+            if (requirePackets && match.packets.empty())
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][PACKET_VISUAL_FAIL] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} totalActors={} playableActors={} team0Count={} team1Count={} packets=0 reason=no_packets result=cancel",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    session.replayPhaseMask,
+                    totalActors,
+                    playableActors,
+                    team0Count,
+                    team1Count);
+                return false;
+            }
+
             session.cloneSceneBuilt = true;
             LOG_INFO("server.loading", "[RTG][REPLAY][PACKET_VISUAL_SCENE] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} totalActors={} playableActors={} team0Count={} team1Count={} packets={} result=use_recorded_packets_no_creature_clones",
                 session.replayId,
@@ -4418,12 +4455,54 @@ namespace
             result ? result : "ok");
     }
 
+    static void StripReplayViewerVisualEquipment(Player* player, ActiveReplaySession& session)
+    {
+        if (!player || !sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.ClearViewerVisibleWeapons", true))
+            return;
+
+        if (session.viewerHidden || session.spectatorShellActive)
+        {
+            if (player->IsVisible())
+                player->SetVisible(false);
+
+            if (session.invisibleDisplayApplied && sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.UseInvisibleDisplay", true))
+                player->SetDisplayId(sConfigMgr->GetOption<uint32>("ArenaReplay.SpectatorShell.InvisibleDisplayId", 11686u));
+        }
+
+        if (!session.virtualItemsStripped)
+        {
+            session.priorVirtualItemSlot[0] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0);
+            session.priorVirtualItemSlot[1] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1);
+            session.priorVirtualItemSlot[2] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2);
+            session.virtualItemsStripped = true;
+        }
+
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, 0);
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, 0);
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, 0);
+    }
+
+    static void RestoreReplayViewerVisualEquipment(Player* player, ActiveReplaySession& session)
+    {
+        if (!player || !session.virtualItemsStripped)
+            return;
+
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, session.priorVirtualItemSlot[0]);
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, session.priorVirtualItemSlot[1]);
+        player->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, session.priorVirtualItemSlot[2]);
+        session.priorVirtualItemSlot[0] = 0;
+        session.priorVirtualItemSlot[1] = 0;
+        session.priorVirtualItemSlot[2] = 0;
+        session.virtualItemsStripped = false;
+    }
+
     static void RestoreReplayViewerState(Player* player, ActiveReplaySession& session)
     {
         if (!player)
             return;
 
         ForceReplayViewerMovementRestore(player);
+        RestoreReplayViewerVisualEquipment(player, session);
 
         if (session.invisibleDisplayApplied && sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.RestoreOnExit", true) && session.priorDisplayId != 0)
             player->SetDisplayId(session.priorDisplayId);
@@ -5142,6 +5221,10 @@ namespace
         session.cameraStallCount = 0;
         session.priorDisplayId = player->GetDisplayId();
         session.invisibleDisplayApplied = false;
+        session.priorVirtualItemSlot[0] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0);
+        session.priorVirtualItemSlot[1] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1);
+        session.priorVirtualItemSlot[2] = player->GetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2);
+        session.virtualItemsStripped = false;
         session.lastCameraX = player->GetPositionX();
         session.lastCameraY = player->GetPositionY();
         session.lastCameraZ = player->GetPositionZ();
@@ -5212,6 +5295,8 @@ namespace
             session.invisibleDisplayApplied = true;
         }
 
+        StripReplayViewerVisualEquipment(player, session);
+
         session.spectatorShellActive = true;
     }
 }
@@ -5239,26 +5324,53 @@ public:
         if (isReplay)
           return true;
 
-        // ignore packets until arena started
-        if (bg->GetStatus() != BattlegroundStatus::STATUS_IN_PROGRESS)
+        // Packet-stream replays need the original object-create packets, which are
+        // commonly sent during arena preparation before STATUS_IN_PROGRESS. Do not
+        // wait for the gates to open; only stop once the match is leaving/finished.
+        if (bg->GetStatus() == BattlegroundStatus::STATUS_WAIT_LEAVE)
             return true;
 
-        // Deterministic recorder selection:
-        // Choose exactly one "recorder" per team per BG instance and keep it stable.
-        // If the recorder leaves, we re-assign to the next player we observe from that team.
-        ObjectGuid recorder = GetOrAssignRecorderGuid(bg, session->GetPlayer());
-        if (recorder && session->GetPlayer()->GetGUID() != recorder)
+        Player* receiver = session->GetPlayer();
+        if (!receiver || receiver->IsSpectator())
             return true;
+
+        bool recordAllParticipants = sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets", true);
+        if (!recordAllParticipants)
+        {
+            // Legacy deterministic recorder selection: choose one recorder per team.
+            ObjectGuid recorder = GetOrAssignRecorderGuid(bg, receiver);
+            if (recorder && receiver->GetGUID() != recorder)
+                return true;
+        }
+        else
+            GetOrAssignRecorderGuid(bg, receiver); // keep legacy recorder metadata populated for diagnostics.
 
         // ignore packets not in watch list
         if (std::find(watchList.begin(), watchList.end(), packet.GetOpcode()) == watchList.end())
             return true;
 
         MatchRecord& record = EnsureLiveMatchRecord(bg);
+        uint32 maxPackets = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay", 25000u);
+        if (maxPackets != 0 && record.packets.size() >= maxPackets)
+        {
+            ++record.skippedPacketCount;
+            return true;
+        }
 
         uint32 timestamp = bg->GetStartTime();
-        // push back packet inside queue of matchId 0
-        record.packets.push_back({ timestamp, /* copy */ WorldPacket(packet) });
+        PacketRecord packetRecord;
+        packetRecord.timestamp = timestamp;
+        packetRecord.packet = WorldPacket(packet);
+        packetRecord.receiverGuid = receiver->GetGUID();
+        packetRecord.receiverTeam = receiver->GetBgTeamId();
+        record.packets.push_back(packetRecord);
+
+        if (packetRecord.receiverTeam == TEAM_ALLIANCE)
+            ++record.team0PacketCount;
+        else if (packetRecord.receiverTeam == TEAM_HORDE)
+            ++record.team1PacketCount;
+        else
+            ++record.neutralPacketCount;
         return true;
     }
 };
@@ -5501,6 +5613,7 @@ public:
             }
             match.packets.pop_front();
         }
+        StripReplayViewerVisualEquipment(replayer, session);
 
         if (IsReplayTimelineComplete(match, session))
         {
@@ -5752,6 +5865,16 @@ public:
 
         match.winnerPlayerGuidList = ParseGuidCsv(winnerGuids);
         match.loserPlayerGuidList = ParseGuidCsv(loserGuids);
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][PACKET_CAPTURE_SUMMARY] replayInstance={} team0Packets={} team1Packets={} neutralPackets={} totalPackets={} skippedPackets={} recordAllParticipants={} result={}",
+            bg->GetInstanceID(),
+            match.team0PacketCount,
+            match.team1PacketCount,
+            match.neutralPacketCount,
+            match.packets.size(),
+            match.skippedPacketCount,
+            sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets", true) ? 1 : 0,
+            (match.team0PacketCount > 0 && match.team1PacketCount > 0) ? "ok" : "single_team_or_empty");
 
         std::string encodedContents = Acore::Encoding::Base32::Encode(buffer.contentsAsVector());
         std::string encodedWinnerTracks = SerializeActorTracks(match.winnerActorTracks);
@@ -6842,7 +6965,10 @@ private:
             if (!IsReplayPacketOpcodeAllowedForPlayback(packet.GetOpcode()))
                 continue;
 
-            record.packets.push_back({ packetTimestamp, packet });
+            PacketRecord packetRecord;
+            packetRecord.timestamp = packetTimestamp;
+            packetRecord.packet = packet;
+            record.packets.push_back(packetRecord);
         }
     }
 };
@@ -7079,6 +7205,7 @@ namespace
                 }
                 match.packets.pop_front();
             }
+            StripReplayViewerVisualEquipment(replayer, session);
 
             if (IsReplayTimelineComplete(match, session))
             {

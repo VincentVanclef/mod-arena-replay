@@ -647,6 +647,50 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 1
 #                     Uses original recorded packets for real player visuals.
 #
+#    ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets
+#        Description: Records visual packets from every arena participant instead
+#                     of only one recorder per team. Packet-stream playback needs
+#                     the original create/update packets for both teams, and some
+#                     critical object-create packets are sent during arena prep.
+#
+#        Default:     1 - Enabled
+#                     0 - Legacy one-recorder-per-team capture
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets = 1
+#                     Captures packet visuals from all participants for fuller playback.
+#
+#    ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay
+#        Description: Safety cap for recorded packet visuals per replay. Set 0 for
+#                     no cap. Higher values improve packet fidelity but increase
+#                     replay row size.
+#
+#        Default:     25000
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay = 25000
+#
+#    ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets
+#        Description: In packet-stream backend, cancel playback when no recorded
+#                     packets are available instead of silently falling back to
+#                     broken creature silhouettes or an empty scene.
+#
+#        Default:     1 - Enabled
+#                     0 - Allow empty packet streams for debugging
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets = 1
+#
+#    ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets
+#        Description: Skips recorded SMSG_DESTROY_OBJECT packets during playback.
+#                     Mixed receiver streams can otherwise destroy objects created
+#                     by another participant's perspective, causing one side to
+#                     disappear. This can leave short-lived objects around longer,
+#                     but is safer for actor visibility while packet-stream replay
+#                     is being stabilized.
+#
+#        Default:     1 - Enabled
+#                     0 - Replay destroy packets normally
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets = 1
+#
 #    ArenaReplay.ActorVisual.CreatureSilhouette.UsePlayerDisplayIds
 #        Description: Controls whether creature silhouette actors apply raw
 #                     captured player display ids to Creature bodies.
@@ -795,6 +839,10 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #
 ArenaReplay.ActorVisual.Backend = 3
 ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 1
+ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets = 1
+ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay = 25000
+ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets = 1
+ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets = 1
 ArenaReplay.ActorVisual.CreatureSilhouette.UsePlayerDisplayIds = 0
 ArenaReplay.ActorVisual.CreatureSilhouette.UseNpcRaceFallbackDisplays = 1
 ArenaReplay.ActorVisual.CreatureSilhouette.Display.Default = 27800
@@ -1646,6 +1694,18 @@ ArenaReplay.Return.SafeFallbackO = 3.69762
 #        Example:     ArenaReplay.SpectatorShell.InvisibleDisplayId = 11686
 #                     Uses display 11686 while the body is hidden.
 #
+#    ArenaReplay.SpectatorShell.ClearViewerVisibleWeapons
+#        Description: Clears the hidden viewer body's virtual weapon slots during
+#                     replay viewing. This prevents the spectator shell from
+#                     appearing as floating weapons when recorded packet updates
+#                     or invisible body morphs leave weapon visuals behind.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.SpectatorShell.ClearViewerVisibleWeapons = 1
+#                     Hidden replay viewers do not leave floating sword artifacts.
+#
 #    ArenaReplay.SpectatorShell.RestoreOnExit
 #        Description: Restores the viewer display id and movement/visibility
 #                     state when replay exits.
@@ -1662,6 +1722,7 @@ ArenaReplay.SpectatorShell.DisableGravity = 1
 ArenaReplay.SpectatorShell.UseFlightForParking = 0
 ArenaReplay.SpectatorShell.UseInvisibleDisplay = 1
 ArenaReplay.SpectatorShell.InvisibleDisplayId = 11686
+ArenaReplay.SpectatorShell.ClearViewerVisibleWeapons = 1
 ArenaReplay.SpectatorShell.RestoreOnExit = 1
 ArenaReplay.SpectatorShell.ForceRestoreMovementFlags = 1
 ArenaReplay.SpectatorShell.DelayedRestoreVerifyMs = 500
