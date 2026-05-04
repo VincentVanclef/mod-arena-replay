@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS `character_arena_replay_actor_snapshot` (
   `mainhand_display_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `offhand_display_id` INT UNSIGNED NOT NULL DEFAULT 0,
   `ranged_display_id` INT UNSIGNED NOT NULL DEFAULT 0,
+  `mainhand_item_entry` INT UNSIGNED NOT NULL DEFAULT 0,
+  `offhand_item_entry` INT UNSIGNED NOT NULL DEFAULT 0,
+  `ranged_item_entry` INT UNSIGNED NOT NULL DEFAULT 0,
   PRIMARY KEY (`id`) USING BTREE,
   UNIQUE INDEX `unique_replay_actor` (`replay_id`, `actor_guid`) USING BTREE,
   INDEX `idx_replay_id` (`replay_id`) USING BTREE

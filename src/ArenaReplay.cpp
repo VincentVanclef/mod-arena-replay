@@ -130,11 +130,18 @@ struct ReplayActorAppearanceSnapshot
     uint8 race = 0;
     uint8 gender = 0;
     std::string name;
+    // Base playable-model display ids only. Creature clones cannot reconstruct
+    // full player armor from these fields.
     uint32 displayId = 0;
     uint32 nativeDisplayId = 0;
+    // Legacy display ids are retained for old rows/inline snapshots, but are
+    // never written into UNIT_VIRTUAL_ITEM_SLOT_ID during playback.
     uint32 mainhandDisplayId = 0;
     uint32 offhandDisplayId = 0;
     uint32 rangedDisplayId = 0;
+    uint32 mainhandItemEntry = 0;
+    uint32 offhandItemEntry = 0;
+    uint32 rangedItemEntry = 0;
 };
 struct MatchRecord
 {
@@ -270,6 +277,12 @@ struct ActiveReplaySession
     float lastCameraY = 0.0f;
     float lastCameraZ = 0.0f;
     float lastCameraO = 0.0f;
+    float smoothedCameraX = 0.0f;
+    float smoothedCameraY = 0.0f;
+    float smoothedCameraZ = 0.0f;
+    float smoothedCameraO = 0.0f;
+    bool hasSmoothedCamera = false;
+    uint32 lastCameraMoveMs = 0;
 };
 struct LiveActorRecorderState
 {
@@ -555,6 +568,24 @@ namespace
         return available;
     }
 
+    static bool ReplayActorSnapshotItemEntryColumnsAvailable()
+    {
+        static bool checked = false;
+        static bool available = false;
+
+        if (!checked)
+        {
+            available =
+                ReplayColumnExists("character_arena_replay_actor_snapshot", "mainhand_item_entry") &&
+                ReplayColumnExists("character_arena_replay_actor_snapshot", "offhand_item_entry") &&
+                ReplayColumnExists("character_arena_replay_actor_snapshot", "ranged_item_entry");
+            checked = true;
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_SCHEMA] itemEntryColumns={} result=checked", available ? 1 : 0);
+        }
+
+        return available;
+    }
+
 
     static MatchRecord& EnsureLiveMatchRecord(Battleground* bg)
     {
@@ -628,7 +659,10 @@ namespace
                 << snapshot.nativeDisplayId << ';'
                 << snapshot.mainhandDisplayId << ';'
                 << snapshot.offhandDisplayId << ';'
-                << snapshot.rangedDisplayId;
+                << snapshot.rangedDisplayId << ';'
+                << snapshot.mainhandItemEntry << ';'
+                << snapshot.offhandItemEntry << ';'
+                << snapshot.rangedItemEntry;
         }
         return out.str();
     }
@@ -679,6 +713,12 @@ namespace
                 snapshot.mainhandDisplayId = uint32(std::stoul(parts[8]));
                 snapshot.offhandDisplayId = uint32(std::stoul(parts[9]));
                 snapshot.rangedDisplayId = uint32(std::stoul(parts[10]));
+                if (parts.size() >= 14)
+                {
+                    snapshot.mainhandItemEntry = uint32(std::stoul(parts[11]));
+                    snapshot.offhandItemEntry = uint32(std::stoul(parts[12]));
+                    snapshot.rangedItemEntry = uint32(std::stoul(parts[13]));
+                }
             }
             catch (...)
             {
@@ -1553,6 +1593,15 @@ namespace
         return item->GetTemplate()->DisplayInfoID;
     }
 
+    static uint32 GetPlayerEquippedItemEntry(Player* player, uint8 slot)
+    {
+        if (!player)
+            return 0;
+
+        Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        return item ? item->GetEntry() : 0;
+    }
+
     static ReplayActorAppearanceSnapshot BuildReplayActorAppearanceSnapshot(Player* player, bool winnerSide)
     {
         ReplayActorAppearanceSnapshot snapshot;
@@ -1570,6 +1619,9 @@ namespace
         snapshot.mainhandDisplayId = GetPlayerEquippedItemDisplayId(player, EQUIPMENT_SLOT_MAINHAND);
         snapshot.offhandDisplayId = GetPlayerEquippedItemDisplayId(player, EQUIPMENT_SLOT_OFFHAND);
         snapshot.rangedDisplayId = GetPlayerEquippedItemDisplayId(player, EQUIPMENT_SLOT_RANGED);
+        snapshot.mainhandItemEntry = GetPlayerEquippedItemEntry(player, EQUIPMENT_SLOT_MAINHAND);
+        snapshot.offhandItemEntry = GetPlayerEquippedItemEntry(player, EQUIPMENT_SLOT_OFFHAND);
+        snapshot.rangedItemEntry = GetPlayerEquippedItemEntry(player, EQUIPMENT_SLOT_RANGED);
         return snapshot;
     }
 
@@ -1600,10 +1652,10 @@ namespace
             return;
         }
 
-        uint32 itemDisplayCount = 0;
-        if (snapshot.mainhandDisplayId) ++itemDisplayCount;
-        if (snapshot.offhandDisplayId) ++itemDisplayCount;
-        if (snapshot.rangedDisplayId) ++itemDisplayCount;
+        uint32 itemEntryCount = 0;
+        if (snapshot.mainhandItemEntry) ++itemEntryCount;
+        if (snapshot.offhandItemEntry) ++itemEntryCount;
+        if (snapshot.rangedItemEntry) ++itemEntryCount;
 
         auto existing = match.actorAppearanceSnapshots.find(snapshot.guid);
         bool changed = existing == match.actorAppearanceSnapshots.end();
@@ -1623,7 +1675,10 @@ namespace
                 prior.nativeDisplayId != snapshot.nativeDisplayId ||
                 prior.mainhandDisplayId != snapshot.mainhandDisplayId ||
                 prior.offhandDisplayId != snapshot.offhandDisplayId ||
-                prior.rangedDisplayId != snapshot.rangedDisplayId;
+                prior.rangedDisplayId != snapshot.rangedDisplayId ||
+                prior.mainhandItemEntry != snapshot.mainhandItemEntry ||
+                prior.offhandItemEntry != snapshot.offhandItemEntry ||
+                prior.rangedItemEntry != snapshot.rangedItemEntry;
         }
 
         match.actorAppearanceSnapshots[snapshot.guid] = snapshot;
@@ -1631,7 +1686,7 @@ namespace
         bool const isSample = source && std::string(source) == "sample";
         if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.AppearanceDebug", true) && (!isSample || changed))
         {
-            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_CAPTURE] replayInstance={} actorGuid={} name={} race={} class={} gender={} displayId={} nativeDisplayId={} itemDisplayCount={} source={} changed={} result=ok",
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_CAPTURE] replayInstance={} actorGuid={} name={} race={} class={} gender={} displayId={} nativeDisplayId={} mainhandEntry={} offhandEntry={} rangedEntry={} mainhandDisplayId={} offhandDisplayId={} rangedDisplayId={} itemEntryCount={} source={} changed={} result=ok",
                 bg->GetInstanceID(),
                 snapshot.guid,
                 snapshot.name,
@@ -1640,9 +1695,21 @@ namespace
                 uint32(snapshot.gender),
                 snapshot.displayId,
                 snapshot.nativeDisplayId,
-                itemDisplayCount,
+                snapshot.mainhandItemEntry,
+                snapshot.offhandItemEntry,
+                snapshot.rangedItemEntry,
+                snapshot.mainhandDisplayId,
+                snapshot.offhandDisplayId,
+                snapshot.rangedDisplayId,
+                itemEntryCount,
                 source ? source : "unknown",
                 changed ? 1 : 0);
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LIMIT] replayInstance={} actorGuid={} name={} displayId={} nativeDisplayId={} result=base_player_display_only reason=creature_clone_cannot_show_full_player_armor",
+                bg->GetInstanceID(),
+                snapshot.guid,
+                snapshot.name,
+                snapshot.displayId,
+                snapshot.nativeDisplayId);
         }
     }
 
@@ -1698,30 +1765,57 @@ namespace
         CharacterDatabase.Execute("DELETE FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}", replayId);
 
         uint32 persisted = 0;
+        bool const itemEntryColumns = ReplayActorSnapshotItemEntryColumnsAvailable();
         for (auto const& pair : match.actorAppearanceSnapshots)
         {
             ReplayActorAppearanceSnapshot const& snapshot = pair.second;
-            CharacterDatabase.Execute(
-                "INSERT INTO `character_arena_replay_actor_snapshot` "
-                "(`replay_id`, `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id`) "
-                "VALUES ({}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {})",
-                replayId,
-                snapshot.guid,
-                snapshot.winnerSide ? 1 : 0,
-                EscapeSqlString(snapshot.name),
-                uint32(snapshot.playerClass),
-                uint32(snapshot.race),
-                uint32(snapshot.gender),
-                snapshot.displayId,
-                snapshot.nativeDisplayId,
-                snapshot.mainhandDisplayId,
-                snapshot.offhandDisplayId,
-                snapshot.rangedDisplayId
-            );
+            if (itemEntryColumns)
+            {
+                CharacterDatabase.Execute(
+                    "INSERT INTO `character_arena_replay_actor_snapshot` "
+                    "(`replay_id`, `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id`, `mainhand_item_entry`, `offhand_item_entry`, `ranged_item_entry`) "
+                    "VALUES ({}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+                    replayId,
+                    snapshot.guid,
+                    snapshot.winnerSide ? 1 : 0,
+                    EscapeSqlString(snapshot.name),
+                    uint32(snapshot.playerClass),
+                    uint32(snapshot.race),
+                    uint32(snapshot.gender),
+                    snapshot.displayId,
+                    snapshot.nativeDisplayId,
+                    snapshot.mainhandDisplayId,
+                    snapshot.offhandDisplayId,
+                    snapshot.rangedDisplayId,
+                    snapshot.mainhandItemEntry,
+                    snapshot.offhandItemEntry,
+                    snapshot.rangedItemEntry
+                );
+            }
+            else
+            {
+                CharacterDatabase.Execute(
+                    "INSERT INTO `character_arena_replay_actor_snapshot` "
+                    "(`replay_id`, `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id`) "
+                    "VALUES ({}, {}, {}, '{}', {}, {}, {}, {}, {}, {}, {}, {})",
+                    replayId,
+                    snapshot.guid,
+                    snapshot.winnerSide ? 1 : 0,
+                    EscapeSqlString(snapshot.name),
+                    uint32(snapshot.playerClass),
+                    uint32(snapshot.race),
+                    uint32(snapshot.gender),
+                    snapshot.displayId,
+                    snapshot.nativeDisplayId,
+                    snapshot.mainhandDisplayId,
+                    snapshot.offhandDisplayId,
+                    snapshot.rangedDisplayId
+                );
+            }
             ++persisted;
         }
 
-        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_PERSIST] replayId={} snapshotCount={} result=ok", replayId, persisted);
+        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_PERSIST] replayId={} snapshotCount={} itemEntryColumns={} result=ok", replayId, persisted, itemEntryColumns ? 1 : 0);
     }
 
     static void LoadReplayActorAppearanceSnapshots(MatchRecord& record, uint32 replayId)
@@ -1731,10 +1825,16 @@ namespace
         if (!replayId)
             return;
 
-        QueryResult result = CharacterDatabase.Query(
-            "SELECT `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id` "
-            "FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}",
-            replayId);
+        bool const itemEntryColumns = ReplayActorSnapshotItemEntryColumnsAvailable();
+        QueryResult result = itemEntryColumns
+            ? CharacterDatabase.Query(
+                "SELECT `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id`, `mainhand_item_entry`, `offhand_item_entry`, `ranged_item_entry` "
+                "FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}",
+                replayId)
+            : CharacterDatabase.Query(
+                "SELECT `actor_guid`, `winner_side`, `actor_name`, `player_class`, `race`, `gender`, `display_id`, `native_display_id`, `mainhand_display_id`, `offhand_display_id`, `ranged_display_id` "
+                "FROM `character_arena_replay_actor_snapshot` WHERE `replay_id` = {}",
+                replayId);
         if (!result)
         {
             LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD] replayId={} snapshotCount=0 result=empty", replayId);
@@ -1760,6 +1860,12 @@ namespace
             snapshot.mainhandDisplayId = fields[8].Get<uint32>();
             snapshot.offhandDisplayId = fields[9].Get<uint32>();
             snapshot.rangedDisplayId = fields[10].Get<uint32>();
+            if (itemEntryColumns)
+            {
+                snapshot.mainhandItemEntry = fields[11].Get<uint32>();
+                snapshot.offhandItemEntry = fields[12].Get<uint32>();
+                snapshot.rangedItemEntry = fields[13].Get<uint32>();
+            }
             if (snapshot.guid)
             {
                 record.actorAppearanceSnapshots[snapshot.guid] = std::move(snapshot);
@@ -1768,7 +1874,7 @@ namespace
         }
         while (result->NextRow());
 
-        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD] replayId={} snapshotCount={} result=ok", replayId, loaded);
+        LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD] replayId={} snapshotCount={} itemEntryColumns={} result=ok", replayId, loaded, itemEntryColumns ? 1 : 0);
     }
 
     static ReplayActorAppearanceSnapshot const* FindReplayActorAppearanceSnapshot(MatchRecord const& match, uint64 actorGuid)
@@ -1787,6 +1893,9 @@ namespace
         uint32 originalDisplay = clone->GetDisplayId();
         char const* source = "fallback";
         uint32 finalDisplay = 0;
+        uint32 mainhandEntry = 0;
+        uint32 offhandEntry = 0;
+        uint32 rangedEntry = 0;
 
         if (snapshot)
         {
@@ -1797,11 +1906,26 @@ namespace
                     clone->SetNativeDisplayId(snapshot->nativeDisplayId);
 
                 clone->SetDisplayId(snapshotDisplay);
-                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, snapshot->mainhandDisplayId);
-                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, snapshot->offhandDisplayId);
-                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, snapshot->rangedDisplayId);
+                mainhandEntry = snapshot->mainhandItemEntry;
+                offhandEntry = snapshot->offhandItemEntry;
+                rangedEntry = snapshot->rangedItemEntry;
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, mainhandEntry);
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, offhandEntry);
+                clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, rangedEntry);
                 finalDisplay = snapshotDisplay;
                 source = "snapshot";
+
+                if (!mainhandEntry && !offhandEntry && !rangedEntry &&
+                    (snapshot->mainhandDisplayId || snapshot->offhandDisplayId || snapshot->rangedDisplayId))
+                {
+                    LOG_WARN("server.loading", "[RTG][REPLAY][CLONE_WEAPON_APPLY] replay={} actorGuid={} cloneGuid={} mainhandEntry=0 offhandEntry=0 rangedEntry=0 legacyMainhandDisplayId={} legacyOffhandDisplayId={} legacyRangedDisplayId={} result=legacy_display_ids_ignored",
+                        session.replayId,
+                        track.guid,
+                        clone->GetGUID().GetCounter(),
+                        snapshot->mainhandDisplayId,
+                        snapshot->offhandDisplayId,
+                        snapshot->rangedDisplayId);
+                }
             }
         }
 
@@ -1810,6 +1934,9 @@ namespace
             finalDisplay = ResolveVisibleReplayFallbackDisplay(track, winnerSide);
             clone->SetNativeDisplayId(finalDisplay);
             clone->SetDisplayId(finalDisplay);
+            mainhandEntry = 0;
+            offhandEntry = 0;
+            rangedEntry = 0;
             clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 0, 0);
             clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 1, 0);
             clone->SetUInt32Value(UNIT_VIRTUAL_ITEM_SLOT_ID + 2, 0);
@@ -1844,6 +1971,25 @@ namespace
             source,
             IsInvalidReplayCloneDisplay(clone->GetDisplayId(), session) ? "invisible" : "ok");
 
+        LOG_INFO("server.loading", "[RTG][REPLAY][CLONE_WEAPON_APPLY] replay={} actorGuid={} actorName={} cloneGuid={} mainhandEntry={} offhandEntry={} rangedEntry={} result=ok",
+            session.replayId,
+            track.guid,
+            track.name,
+            clone->GetGUID().GetCounter(),
+            mainhandEntry,
+            offhandEntry,
+            rangedEntry);
+
+        if (snapshot && std::string(source) == "snapshot")
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LIMIT] replay={} actorGuid={} actorName={} displayId={} nativeDisplayId={} result=base_player_display_only reason=creature_clone_cannot_show_full_player_armor",
+                session.replayId,
+                track.guid,
+                track.name,
+                snapshot->displayId,
+                snapshot->nativeDisplayId);
+        }
+
         return clone->GetDisplayId();
     }
 
@@ -1855,6 +2001,34 @@ namespace
         for (ReplayCloneBinding const& binding : session.cloneBindings)
             if (binding.actorGuid == actorGuid)
                 return viewer->GetMap()->GetCreature(binding.cloneGuid);
+
+        return nullptr;
+    }
+
+    static ActorTrack const* SelectFirstReplayActorWithClone(Player* viewer, MatchRecord const& match, ActiveReplaySession& session, uint64 avoidActorGuid, uint32* flatIndex = nullptr)
+    {
+        std::vector<ReplayActorSelectionRef> playable = BuildPlayableReplayActorSelections(match);
+        for (uint32 i = 0; i < playable.size(); ++i)
+        {
+            ReplayActorSelectionRef const& ref = playable[i];
+            auto const* tracks = SelectTracks(match, ref.winnerSide);
+            if (!tracks || ref.trackIndex >= tracks->size())
+                continue;
+
+            ActorTrack const& candidate = (*tracks)[ref.trackIndex];
+            if (candidate.guid == avoidActorGuid)
+                continue;
+
+            if (!FindReplayClone(viewer, session, candidate.guid))
+                continue;
+
+            session.actorSpectateOnWinnerTeam = ref.winnerSide;
+            session.actorTrackIndex = ref.trackIndex;
+            session.nextActorTeleportMs = 0;
+            if (flatIndex)
+                *flatIndex = i + 1;
+            return &candidate;
+        }
 
         return nullptr;
     }
@@ -2258,7 +2432,7 @@ namespace
         if (ActorTrack const* track = GetSelectedReplayActorTrack(const_cast<MatchRecord&>(match), session, &flatIndex))
         {
             bool haveFrame = false;
-            ActorFrame frame = GetInterpolatedActorFrame(*track, 0, haveFrame);
+            ActorFrame frame = GetInterpolatedActorFrame(*track, session.replayPlaybackMs, haveFrame);
             if (haveFrame)
             {
                 x = frame.x;
@@ -2389,6 +2563,8 @@ namespace
         session.nextCameraAnchorRetryMs = 0;
         session.fixedCameraFallbackApplied = false;
         session.cameraAnchorDisplayId = 0;
+        session.hasSmoothedCamera = false;
+        session.lastCameraMoveMs = 0;
     }
 
     static bool GetFirstValidActorFrame(ActorTrack const& track, ActorFrame& out)
@@ -3987,6 +4163,8 @@ namespace
         session.lastAppliedActorFlatIndex = 0;
         session.cameraStallCount = 0;
         session.fixedCameraFallbackApplied = false;
+        session.hasSmoothedCamera = false;
+        session.lastCameraMoveMs = 0;
     }
 
     static ActorFrame GetInterpolatedActorFrame(ActorTrack const& track, uint32 nowMs, bool& ok)
@@ -4074,9 +4252,51 @@ namespace
             }
         }
 
+        uint64 const viewerActorGuid = replayer->GetGUID().GetRawValue();
+        Creature* selectedClone = FindReplayClone(replayer, session, track->guid);
+        bool selectedSelf = track->guid == viewerActorGuid;
+        if (selectedSelf && !selectedClone)
+        {
+            uint32 fallbackFlatIndex = flatIndex;
+            if (ActorTrack const* fallbackTrack = SelectFirstReplayActorWithClone(replayer, match, session, viewerActorGuid, &fallbackFlatIndex))
+            {
+                if (replayer->GetSession())
+                    ChatHandler(replayer->GetSession()).PSendSysMessage("Your replay clone was not available; switching to another actor.");
+
+                LOG_WARN("server.loading", "[RTG][REPLAY][SELF_POV] replay={} viewerGuid={} actorGuid={} cloneGuid=0 viewMode=camera_anchor result=missing_clone_switch",
+                    session.replayId,
+                    replayer->GetGUID().GetCounter(),
+                    viewerActorGuid);
+                track = fallbackTrack;
+                flatIndex = fallbackFlatIndex;
+                selectedSelf = false;
+                selectedClone = FindReplayClone(replayer, session, track->guid);
+                forceImmediate = true;
+            }
+            else
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][SELF_POV] replay={} viewerGuid={} actorGuid={} cloneGuid=0 viewMode=camera_anchor result=no_clone_binding",
+                    session.replayId,
+                    replayer->GetGUID().GetCounter(),
+                    viewerActorGuid);
+                if (ReplayCloneModeEnabled() && (ReplayCameraFallbackMode() == 1 || ReplayBodyChaseFallbackDisabled()))
+                    return ApplyReplayFixedCameraFallback(replayer, session, "self_clone_missing");
+                return false;
+            }
+        }
+
         bool actorChanged = (session.lastAppliedActorGuid != track->guid || session.lastAppliedActorFlatIndex != flatIndex);
         if (actorChanged)
             forceImmediate = true;
+
+        if (selectedSelf && (forceImmediate || actorChanged || ReplayDebugVerbose()))
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][SELF_POV] replay={} viewerGuid={} actorGuid={} cloneGuid={} viewMode=camera_anchor result=ok",
+                session.replayId,
+                replayer->GetGUID().GetCounter(),
+                track->guid,
+                selectedClone ? selectedClone->GetGUID().GetCounter() : 0);
+        }
 
         if (!forceImmediate && session.nextActorTeleportMs > nowMs)
             return true;
@@ -4095,10 +4315,79 @@ namespace
         float snapDistance = std::max(0.5f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.SnapDistance", 1.10f));
         float orientationLerpPct = std::min(1.0f, std::max(0.05f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.OrientationLerpPct", 0.45f)));
 
-        float targetX = frame.x - std::cos(frame.o) * followDistance;
-        float targetY = frame.y - std::sin(frame.o) * followDistance;
-        float targetZ = frame.z + followHeight;
-        float targetO = frame.o;
+        float baseX = frame.x;
+        float baseY = frame.y;
+        float baseZ = frame.z;
+        float baseO = frame.o;
+        bool usedClonePosition = false;
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.CameraSmoothing.UseClonePosition", true) && selectedClone)
+        {
+            baseX = selectedClone->GetPositionX();
+            baseY = selectedClone->GetPositionY();
+            baseZ = selectedClone->GetPositionZ();
+            baseO = selectedClone->GetOrientation();
+            usedClonePosition = true;
+        }
+
+        float targetX = baseX - std::cos(baseO) * followDistance;
+        float targetY = baseY - std::sin(baseO) * followDistance;
+        float targetZ = baseZ + followHeight;
+        float targetO = baseO;
+
+        float rawTargetZ = targetZ;
+        bool smoothSnap = forceImmediate || actorChanged || !session.hasSmoothedCamera;
+        float smoothDeltaZ = 0.0f;
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.ActorSpectate.CameraSmoothing.Enable", true))
+        {
+            float xyLerpPct = std::min(1.0f, std::max(0.01f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.XYLerpPct", 0.45f)));
+            float zLerpPct = std::min(1.0f, std::max(0.01f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.ZLerpPct", 0.18f)));
+            float zDeadband = std::max(0.0f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.ZDeadband", 0.30f));
+            float zSnapDistance = std::max(zDeadband, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.ZSnapDistance", 4.0f));
+
+            if (!session.hasSmoothedCamera || forceImmediate || actorChanged)
+            {
+                session.smoothedCameraX = targetX;
+                session.smoothedCameraY = targetY;
+                session.smoothedCameraZ = targetZ;
+                session.smoothedCameraO = targetO;
+                session.hasSmoothedCamera = true;
+                smoothSnap = true;
+            }
+            else
+            {
+                smoothDeltaZ = targetZ - session.smoothedCameraZ;
+                session.smoothedCameraX += (targetX - session.smoothedCameraX) * xyLerpPct;
+                session.smoothedCameraY += (targetY - session.smoothedCameraY) * xyLerpPct;
+
+                if (std::abs(smoothDeltaZ) > zSnapDistance)
+                {
+                    session.smoothedCameraZ = targetZ;
+                    smoothSnap = true;
+                }
+                else if (std::abs(smoothDeltaZ) >= zDeadband)
+                    session.smoothedCameraZ += smoothDeltaZ * zLerpPct;
+
+                session.smoothedCameraO = targetO;
+            }
+
+            targetX = session.smoothedCameraX;
+            targetY = session.smoothedCameraY;
+            targetZ = session.smoothedCameraZ;
+            targetO = session.smoothedCameraO;
+
+            if (ReplayDebugEnabled(ReplayDebugFlag::Actors) && (forceImmediate || ReplayDebugVerbose()))
+            {
+                LOG_INFO("server.loading", "[RTG][REPLAY][CAMERA_SMOOTH] replay={} viewerGuid={} actorGuid={} targetZ={} smoothedZ={} deltaZ={} snap={} useClonePosition={} result=ok",
+                    session.replayId,
+                    replayer->GetGUID().GetCounter(),
+                    track->guid,
+                    rawTargetZ,
+                    targetZ,
+                    smoothDeltaZ,
+                    smoothSnap ? 1 : 0,
+                    usedClonePosition ? 1 : 0);
+            }
+        }
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.UseViewpoint", true) && (session.viewpointBound || session.cameraAnchorGuid))
         {
@@ -4108,8 +4397,17 @@ namespace
                 float ady = anchor->GetPositionY() - targetY;
                 float adz = anchor->GetPositionZ() - targetZ;
                 float anchorDistSq = adx * adx + ady * ady + adz * adz;
-                if (forceImmediate || anchorDistSq > (snapDistance * snapDistance) || actorChanged)
+                float anchorXYDistSq = adx * adx + ady * ady;
+                float minAnchorMoveDistance = std::max(0.0f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorMoveDistance", 0.10f));
+                float minAnchorZMoveDistance = std::max(0.0f, sConfigMgr->GetOption<float>("ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorZMoveDistance", 0.20f));
+                uint32 minMoveMs = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorSpectate.CameraSmoothing.MinMoveMs", 50u);
+                bool moveDue = minMoveMs == 0 || session.lastCameraMoveMs == 0 || nowMs >= session.lastCameraMoveMs + minMoveMs;
+                bool smallMoveExceeded = anchorXYDistSq > (minAnchorMoveDistance * minAnchorMoveDistance) || std::abs(adz) > minAnchorZMoveDistance;
+                if (forceImmediate || anchorDistSq > (snapDistance * snapDistance) || actorChanged || (moveDue && smallMoveExceeded))
+                {
                     anchor->NearTeleportTo(targetX, targetY, targetZ, targetO);
+                    session.lastCameraMoveMs = nowMs;
+                }
                 else
                     anchor->SetFacingTo(targetO);
             }
@@ -4129,11 +4427,18 @@ namespace
                    << " actorGuid=" << track->guid
                    << " actorName=" << track->name
                    << " actorIndex=" << flatIndex << '/' << GetReplayActorTotalCount(match)
-                   << " x=" << targetX << " y=" << targetY << " z=" << targetZ << " o=" << frame.o
+                   << " x=" << targetX << " y=" << targetY << " z=" << targetZ << " o=" << targetO
                    << " spectatorShell=0 viewpoint=" << (session.viewpointBound ? 1 : 0);
                 ReplayLog(ReplayDebugFlag::Actors, &session, replayer, "APPLY", ss.str());
             }
             return true;
+        }
+
+        if (ReplayCloneModeEnabled() && ReplayBodyChaseFallbackDisabled())
+        {
+            session.lastAppliedActorGuid = track->guid;
+            session.lastAppliedActorFlatIndex = flatIndex;
+            return ApplyReplayFixedCameraFallback(replayer, session, "body_chase_disabled");
         }
 
         float dx = replayer->GetPositionX() - targetX;
@@ -4287,6 +4592,12 @@ namespace
         session.lastCameraY = player->GetPositionY();
         session.lastCameraZ = player->GetPositionZ();
         session.lastCameraO = player->GetOrientation();
+        session.smoothedCameraX = session.lastCameraX;
+        session.smoothedCameraY = session.lastCameraY;
+        session.smoothedCameraZ = session.lastCameraZ;
+        session.smoothedCameraO = session.lastCameraO;
+        session.hasSmoothedCamera = false;
+        session.lastCameraMoveMs = 0;
 
         if (ReplayDebugEnabled(ReplayDebugFlag::General))
         {

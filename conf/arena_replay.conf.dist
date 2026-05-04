@@ -292,10 +292,9 @@ ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
 #                     track exists, start playback on their own recorded actor
 #                     instead of using the normal first-team selection.
 #
-#                     When this happens, the live viewer avatar is used as the
-#                     self-actor bridge during playback so the participant can
-#                     actually watch their own side instead of only the opposing
-#                     team.
+#                     In copied-instance clone mode, self POV follows the
+#                     participant's replay clone through the camera anchor. The
+#                     live viewer body stays hidden and parked.
 #
 #        Default:     1 - Enabled
 #                     0 - Disabled
@@ -351,6 +350,106 @@ ArenaReplay.Library.RecentlyWatched.RetentionDays = 90
 #
 #        Example:     ArenaReplay.ActorSpectate.OrientationLerpPct = 0.60
 #                     Rotates the camera more aggressively during follow.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.Enable
+#        Description: Enables smoothing/deadband for camera-anchor movement.
+#
+#                     This reduces vertical bobbing caused by raw actor Z frame
+#                     jitter, terrain snaps, and per-frame clone movement noise.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.Enable = 1
+#                     Smooths replay camera-anchor follow movement.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.XYLerpPct
+#        Description: Fraction of horizontal camera distance closed on each
+#                     smoothing update.
+#
+#                     Higher values track actors more tightly. Lower values are
+#                     steadier but lag farther behind sudden direction changes.
+#
+#        Default:     0.45
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.XYLerpPct = 0.45
+#                     Uses moderate horizontal smoothing.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.ZLerpPct
+#        Description: Fraction of vertical camera distance closed on each
+#                     smoothing update when the Z delta is outside deadband.
+#
+#                     Keep lower than XY smoothing to reduce up/down bobbing.
+#
+#        Default:     0.18
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.ZLerpPct = 0.18
+#                     Uses gentle vertical smoothing.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.ZDeadband
+#        Description: Vertical delta, in yards, ignored by camera smoothing.
+#
+#                     Small raw Z changes below this value do not move the
+#                     camera anchor.
+#
+#        Default:     0.30
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.ZDeadband = 0.30
+#                     Ignores small vertical noise.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.ZSnapDistance
+#        Description: Vertical delta, in yards, that forces the smoothed camera
+#                     to snap to the target Z.
+#
+#                     This prevents smoothing from dragging through large,
+#                     legitimate height transitions such as Ring of Valor lifts.
+#
+#        Default:     4.0
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.ZSnapDistance = 4.0
+#                     Snaps large vertical movement immediately.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.MinMoveMs
+#        Description: Minimum milliseconds between small camera-anchor teleports.
+#
+#                     Large snaps, actor changes, and forced camera application
+#                     can still move immediately.
+#
+#        Default:     50
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.MinMoveMs = 50
+#                     Avoids tiny per-tick camera teleports.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.UseClonePosition
+#        Description: Uses the selected actor clone's current world position as
+#                     the camera target when available.
+#
+#                     This makes the camera follow the visible replay body
+#                     instead of raw actor-frame Z jitter.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.UseClonePosition = 1
+#                     Camera follows the clone seen by the viewer.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorMoveDistance
+#        Description: Minimum horizontal distance, in yards, before a small
+#                     smoothed camera target moves the anchor.
+#
+#        Default:     0.10
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorMoveDistance = 0.10
+#                     Skips imperceptibly small horizontal anchor moves.
+#
+#    ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorZMoveDistance
+#        Description: Minimum vertical distance, in yards, before a small
+#                     smoothed camera target moves the anchor.
+#
+#        Default:     0.20
+#
+#        Example:     ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorZMoveDistance = 0.20
+#                     Skips imperceptibly small vertical anchor moves.
 #
 #    ArenaReplay.Playback.PacketBudgetPerUpdate
 #        Description: Maximum number of recorded replay packets sent to the
@@ -474,6 +573,15 @@ ArenaReplay.ActorSpectate.FollowDistance = 2.25
 ArenaReplay.ActorSpectate.FollowHeight = 1.75
 ArenaReplay.ActorSpectate.SnapDistance = 1.10
 ArenaReplay.ActorSpectate.OrientationLerpPct = 0.45
+ArenaReplay.ActorSpectate.CameraSmoothing.Enable = 1
+ArenaReplay.ActorSpectate.CameraSmoothing.XYLerpPct = 0.45
+ArenaReplay.ActorSpectate.CameraSmoothing.ZLerpPct = 0.18
+ArenaReplay.ActorSpectate.CameraSmoothing.ZDeadband = 0.30
+ArenaReplay.ActorSpectate.CameraSmoothing.ZSnapDistance = 4.0
+ArenaReplay.ActorSpectate.CameraSmoothing.MinMoveMs = 50
+ArenaReplay.ActorSpectate.CameraSmoothing.UseClonePosition = 1
+ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorMoveDistance = 0.10
+ArenaReplay.ActorSpectate.CameraSmoothing.MinAnchorZMoveDistance = 0.20
 ArenaReplay.Playback.PacketBudgetPerUpdate = 40
 ArenaReplay.Playback.Mode = 1
 ArenaReplay.Playback.CloneMode.Enable = 1
