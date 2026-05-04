@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS `character_arena_replays` (
   `loserPlayerGuids` VARCHAR(255) NULL DEFAULT NULL,
   `winnerActorTrack` LONGTEXT NULL,
   `loserActorTrack` LONGTEXT NULL,
+  `actorAppearanceSnapshots` LONGTEXT NULL,
   `timesWatched` INT NOT NULL DEFAULT 0,
   `timestamp` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE
@@ -48,6 +49,22 @@ SET @stmt := IF(
   ),
   'SELECT 1',
   'ALTER TABLE `character_arena_replays` ADD COLUMN `loserActorTrack` LONGTEXT NULL AFTER `winnerActorTrack`'
+);
+PREPARE stmt FROM @stmt;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+
+SET @stmt := IF(
+  EXISTS (
+    SELECT 1
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = @arenaReplayDb
+      AND TABLE_NAME = 'character_arena_replays'
+      AND COLUMN_NAME = 'actorAppearanceSnapshots'
+  ),
+  'SELECT 1',
+  'ALTER TABLE `character_arena_replays` ADD COLUMN `actorAppearanceSnapshots` LONGTEXT NULL AFTER `loserActorTrack`'
 );
 PREPARE stmt FROM @stmt;
 EXECUTE stmt;

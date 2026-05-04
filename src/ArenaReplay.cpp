@@ -521,6 +521,40 @@ namespace
         return value;
     }
 
+    static std::string SanitizeReplayToken(std::string value)
+    {
+        for (char& ch : value)
+            if (ch == ';' || ch == '|' || ch == ',' || ch == '\n' || ch == '\r')
+                ch = ' ';
+        return value;
+    }
+
+    static bool ReplayColumnExists(char const* tableName, char const* columnName)
+    {
+        if (!tableName || !columnName)
+            return false;
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}' AND COLUMN_NAME = '{}' LIMIT 1",
+            tableName, columnName);
+        return result != nullptr;
+    }
+
+    static bool ReplayAppearanceInlineColumnAvailable()
+    {
+        static bool checked = false;
+        static bool available = false;
+
+        if (!checked)
+        {
+            available = ReplayColumnExists("character_arena_replays", "actorAppearanceSnapshots");
+            checked = true;
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_SCHEMA] inlineColumn={} result=checked", available ? 1 : 0);
+        }
+
+        return available;
+    }
+
 
     static MatchRecord& EnsureLiveMatchRecord(Battleground* bg)
     {
@@ -568,6 +602,97 @@ namespace
             }
         }
         return out.str();
+    }
+
+    static std::string SerializeReplayActorAppearanceSnapshots(std::unordered_map<uint64, ReplayActorAppearanceSnapshot> const& snapshots)
+    {
+        std::ostringstream out;
+        bool first = true;
+        for (auto const& pair : snapshots)
+        {
+            ReplayActorAppearanceSnapshot const& snapshot = pair.second;
+            if (!snapshot.guid)
+                continue;
+
+            if (!first)
+                out << "||";
+            first = false;
+
+            out << snapshot.guid << ';'
+                << (snapshot.winnerSide ? 1 : 0) << ';'
+                << SanitizeReplayToken(snapshot.name) << ';'
+                << uint32(snapshot.playerClass) << ';'
+                << uint32(snapshot.race) << ';'
+                << uint32(snapshot.gender) << ';'
+                << snapshot.displayId << ';'
+                << snapshot.nativeDisplayId << ';'
+                << snapshot.mainhandDisplayId << ';'
+                << snapshot.offhandDisplayId << ';'
+                << snapshot.rangedDisplayId;
+        }
+        return out.str();
+    }
+
+    static uint32 DeserializeReplayActorAppearanceSnapshots(std::unordered_map<uint64, ReplayActorAppearanceSnapshot>& snapshots, std::string const& encoded)
+    {
+        if (encoded.empty())
+            return 0;
+
+        uint32 loaded = 0;
+        size_t start = 0;
+        while (start < encoded.size())
+        {
+            size_t end = encoded.find("||", start);
+            std::string entry = encoded.substr(start, end == std::string::npos ? std::string::npos : end - start);
+            start = (end == std::string::npos) ? encoded.size() : end + 2;
+            if (entry.empty())
+                continue;
+
+            std::vector<std::string> parts;
+            size_t pstart = 0;
+            while (true)
+            {
+                size_t pend = entry.find(';', pstart);
+                if (pend == std::string::npos)
+                {
+                    parts.push_back(entry.substr(pstart));
+                    break;
+                }
+                parts.push_back(entry.substr(pstart, pend - pstart));
+                pstart = pend + 1;
+            }
+
+            if (parts.size() < 11)
+                continue;
+
+            ReplayActorAppearanceSnapshot snapshot;
+            try
+            {
+                snapshot.guid = std::stoull(parts[0]);
+                snapshot.winnerSide = std::stoul(parts[1]) != 0;
+                snapshot.name = parts[2];
+                snapshot.playerClass = uint8(std::stoul(parts[3]));
+                snapshot.race = uint8(std::stoul(parts[4]));
+                snapshot.gender = uint8(std::stoul(parts[5]));
+                snapshot.displayId = uint32(std::stoul(parts[6]));
+                snapshot.nativeDisplayId = uint32(std::stoul(parts[7]));
+                snapshot.mainhandDisplayId = uint32(std::stoul(parts[8]));
+                snapshot.offhandDisplayId = uint32(std::stoul(parts[9]));
+                snapshot.rangedDisplayId = uint32(std::stoul(parts[10]));
+            }
+            catch (...)
+            {
+                continue;
+            }
+
+            if (!snapshot.guid)
+                continue;
+
+            snapshots[snapshot.guid] = std::move(snapshot);
+            ++loaded;
+        }
+
+        return loaded;
     }
 
     static std::vector<ActorTrack> DeserializeActorTracks(std::string const& encoded)
@@ -1924,9 +2049,12 @@ namespace
             return false;
         }
 
-        viewer->SetCanFly(true);
-        viewer->SetDisableGravity(true);
-        viewer->SetHover(true);
+        if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.UseFlightForParking", false))
+        {
+            viewer->SetCanFly(true);
+            viewer->SetDisableGravity(true);
+            viewer->SetHover(true);
+        }
         viewer->StopMoving();
         viewer->SetClientControl(viewer, false);
         session.movementLocked = true;
@@ -1984,9 +2112,12 @@ namespace
 
         if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.DisableGravity", true))
         {
-            viewer->SetCanFly(true);
-            viewer->SetDisableGravity(true);
-            viewer->SetHover(true);
+            if (sConfigMgr->GetOption<bool>("ArenaReplay.SpectatorShell.UseFlightForParking", false))
+            {
+                viewer->SetCanFly(true);
+                viewer->SetDisableGravity(true);
+                viewer->SetHover(true);
+            }
             viewer->StopMoving();
         }
 
@@ -4760,34 +4891,85 @@ public:
         std::string encodedContents = Acore::Encoding::Base32::Encode(buffer.contentsAsVector());
         std::string encodedWinnerTracks = SerializeActorTracks(match.winnerActorTracks);
         std::string encodedLoserTracks = SerializeActorTracks(match.loserActorTracks);
+        std::string encodedActorAppearance = SerializeReplayActorAppearanceSnapshots(match.actorAppearanceSnapshots);
+        bool const inlineAppearanceColumn = ReplayAppearanceInlineColumnAvailable();
 
-        CharacterDatabase.Execute("INSERT INTO `character_arena_replays` "
-            "(`arenaTypeId`, `typeId`, `contentSize`, `contents`, `mapId`, `winnerTeamName`, `winnerTeamRating`, `winnerTeamMMR`, "
-            "`loserTeamName`, `loserTeamRating`, `loserTeamMMR`, `winnerPlayerGuids`, `loserPlayerGuids`, `winnerActorTrack`, `loserActorTrack`) "
-            "VALUES ({}, {}, {}, '{}', {}, '{}', {}, {}, '{}', {}, {}, '{}', '{}', '{}', '{}')",
-            uint32(match.arenaTypeId),
-            uint32(match.typeId),
-            buffer.size(),
-            EscapeSqlString(encodedContents),
-            bg->GetMapId(),
-            EscapeSqlString(teamWinnerName),
-            teamWinnerRating,
-            teamWinnerMMR,
-            EscapeSqlString(teamLoserName),
-            teamLoserRating,
-            teamLoserMMR,
-            EscapeSqlString(winnerGuids),
-            EscapeSqlString(loserGuids),
-            EscapeSqlString(encodedWinnerTracks),
-            EscapeSqlString(encodedLoserTracks)
-        );
+        if (inlineAppearanceColumn)
+        {
+            CharacterDatabase.Execute("INSERT INTO `character_arena_replays` "
+                "(`arenaTypeId`, `typeId`, `contentSize`, `contents`, `mapId`, `winnerTeamName`, `winnerTeamRating`, `winnerTeamMMR`, "
+                "`loserTeamName`, `loserTeamRating`, `loserTeamMMR`, `winnerPlayerGuids`, `loserPlayerGuids`, `winnerActorTrack`, `loserActorTrack`, `actorAppearanceSnapshots`) "
+                "VALUES ({}, {}, {}, '{}', {}, '{}', {}, {}, '{}', {}, {}, '{}', '{}', '{}', '{}', '{}')",
+                uint32(match.arenaTypeId),
+                uint32(match.typeId),
+                buffer.size(),
+                EscapeSqlString(encodedContents),
+                bg->GetMapId(),
+                EscapeSqlString(teamWinnerName),
+                teamWinnerRating,
+                teamWinnerMMR,
+                EscapeSqlString(teamLoserName),
+                teamLoserRating,
+                teamLoserMMR,
+                EscapeSqlString(winnerGuids),
+                EscapeSqlString(loserGuids),
+                EscapeSqlString(encodedWinnerTracks),
+                EscapeSqlString(encodedLoserTracks),
+                EscapeSqlString(encodedActorAppearance)
+            );
+        }
+        else
+        {
+            CharacterDatabase.Execute("INSERT INTO `character_arena_replays` "
+                "(`arenaTypeId`, `typeId`, `contentSize`, `contents`, `mapId`, `winnerTeamName`, `winnerTeamRating`, `winnerTeamMMR`, "
+                "`loserTeamName`, `loserTeamRating`, `loserTeamMMR`, `winnerPlayerGuids`, `loserPlayerGuids`, `winnerActorTrack`, `loserActorTrack`) "
+                "VALUES ({}, {}, {}, '{}', {}, '{}', {}, {}, '{}', {}, {}, '{}', '{}', '{}', '{}')",
+                uint32(match.arenaTypeId),
+                uint32(match.typeId),
+                buffer.size(),
+                EscapeSqlString(encodedContents),
+                bg->GetMapId(),
+                EscapeSqlString(teamWinnerName),
+                teamWinnerRating,
+                teamWinnerMMR,
+                EscapeSqlString(teamLoserName),
+                teamLoserRating,
+                teamLoserMMR,
+                EscapeSqlString(winnerGuids),
+                EscapeSqlString(loserGuids),
+                EscapeSqlString(encodedWinnerTracks),
+                EscapeSqlString(encodedLoserTracks)
+            );
+        }
 
         QueryResult insertedIdResult = CharacterDatabase.Query("SELECT LAST_INSERT_ID()");
         uint32 insertedReplayId = 0;
         if (insertedIdResult)
             insertedReplayId = insertedIdResult->Fetch()[0].Get<uint32>();
 
-        PersistReplayActorAppearanceSnapshots(insertedReplayId, match);
+        if (!insertedReplayId)
+        {
+            QueryResult fallbackIdResult = CharacterDatabase.Query(
+                "SELECT `id` FROM `character_arena_replays` "
+                "WHERE `mapId` = {} AND `arenaTypeId` = {} AND `typeId` = {} "
+                "AND `winnerPlayerGuids` = '{}' AND `loserPlayerGuids` = '{}' "
+                "ORDER BY `id` DESC LIMIT 1",
+                bg->GetMapId(),
+                uint32(match.arenaTypeId),
+                uint32(match.typeId),
+                EscapeSqlString(winnerGuids),
+                EscapeSqlString(loserGuids));
+            if (fallbackIdResult)
+                insertedReplayId = fallbackIdResult->Fetch()[0].Get<uint32>();
+        }
+
+        if (!insertedReplayId)
+            LOG_WARN("server.loading", "[RTG][REPLAY][APPEARANCE_PERSIST] replayId=0 snapshotCount={} inlineColumn={} result=no_replay_id", uint32(match.actorAppearanceSnapshots.size()), inlineAppearanceColumn ? 1 : 0);
+        else
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_PERSIST] replayId={} snapshotCount={} inlineColumn={} result=inline_saved", insertedReplayId, uint32(match.actorAppearanceSnapshots.size()), inlineAppearanceColumn ? 1 : 0);
+            PersistReplayActorAppearanceSnapshots(insertedReplayId, match);
+        }
 
         for (Player* notifyPlayer : notifyPlayers)
             if (notifyPlayer)
@@ -5683,7 +5865,10 @@ private:
 
     bool loadReplayDataForPlayer(Player* p, uint32 matchId)
     {
-        QueryResult result = CharacterDatabase.Query("SELECT id, arenaTypeId, typeId, contentSize, contents, mapId, timesWatched, winnerPlayerGuids, loserPlayerGuids, winnerActorTrack, loserActorTrack FROM character_arena_replays WHERE id = {}", matchId);
+        bool const inlineAppearanceColumn = ReplayAppearanceInlineColumnAvailable();
+        QueryResult result = inlineAppearanceColumn
+            ? CharacterDatabase.Query("SELECT id, arenaTypeId, typeId, contentSize, contents, mapId, timesWatched, winnerPlayerGuids, loserPlayerGuids, winnerActorTrack, loserActorTrack, actorAppearanceSnapshots FROM character_arena_replays WHERE id = {}", matchId)
+            : CharacterDatabase.Query("SELECT id, arenaTypeId, typeId, contentSize, contents, mapId, timesWatched, winnerPlayerGuids, loserPlayerGuids, winnerActorTrack, loserActorTrack FROM character_arena_replays WHERE id = {}", matchId);
         if (!result)
         {
             ChatHandler(p->GetSession()).PSendSysMessage("Replay data not found.");
@@ -5704,6 +5889,15 @@ private:
         MatchRecord record;
         deserializeMatchData(record, fields);
         LoadReplayActorAppearanceSnapshots(record, matchId);
+        if (inlineAppearanceColumn)
+        {
+            uint32 inlineLoaded = DeserializeReplayActorAppearanceSnapshots(record.actorAppearanceSnapshots, fields[11].Get<std::string>());
+            LOG_INFO("server.loading", "[RTG][REPLAY][APPEARANCE_LOAD_INLINE] replayId={} snapshotCount={} totalSnapshots={} result={}",
+                matchId,
+                inlineLoaded,
+                uint32(record.actorAppearanceSnapshots.size()),
+                inlineLoaded ? "ok" : "empty");
+        }
 
         const bool hasPlayableActorTracks = !BuildPlayableReplayActorSelections(record).empty();
         if (record.packets.empty() && !hasPlayableActorTracks)
