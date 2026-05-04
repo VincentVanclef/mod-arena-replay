@@ -691,18 +691,33 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #
 #        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets = 1
 #
-#    ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid
-#        Description: Rewrites recorded packets that reference the live viewer's
-#                     original player GUID to a session-local replay visual GUID.
-#                     This prevents the client's real hidden viewer object from
-#                     being mutated by replay packets, which previously caused
-#                     floating weapon/sword artifacts and dirty exit state when
-#                     watching a replay that included the current character.
+#    ArenaReplay.ActorVisual.RecordedPacketStream.SkipViewerGuidPackets
+#        Description: Safely skips recorded visual packets that contain the live
+#                     viewer's own player GUID. This prevents packet playback
+#                     from mutating the hidden spectator shell into floating
+#                     weapons/body fragments or dirtying teardown state.
+#
+#                     This is intentionally safer than raw byte-level GUID
+#                     rewriting. Raw replacement inside arbitrary 3.3.5a packet
+#                     payloads can corrupt packet structure and crash the client.
+#                     A future opcode-aware object-update rewriter may replace
+#                     this, but the safe default is to omit the viewer's own
+#                     replay actor from packet visuals.
 #
 #        Default:     1 - Enabled
-#                     0 - Do not rewrite viewer GUID references
+#                     0 - Send packets that reference the live viewer GUID
 #
-#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid = 1
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.SkipViewerGuidPackets = 1
+#
+#    ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid
+#        Description: Experimental, unsafe legacy switch for raw viewer-GUID
+#                     replacement. Keep disabled. Use SkipViewerGuidPackets
+#                     until opcode-aware packet rewriting exists.
+#
+#        Default:     0 - Disabled
+#                     1 - Attempt legacy raw-byte GUID replacement
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid = 0
 #
 #    ArenaReplay.ActorVisual.RecordedPacketStream.SkipUnmappedViewerGuidPackets
 #        Description: Safety valve used after GUID remapping. If a packet still
@@ -868,7 +883,8 @@ ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets = 1
 ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay = 25000
 ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets = 1
 ArenaReplay.ActorVisual.RecordedPacketStream.FilterDestroyObjectPackets = 1
-ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid = 1
+ArenaReplay.ActorVisual.RecordedPacketStream.SkipViewerGuidPackets = 1
+ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid = 0
 ArenaReplay.ActorVisual.RecordedPacketStream.SkipUnmappedViewerGuidPackets = 1
 ArenaReplay.ActorVisual.CreatureSilhouette.UsePlayerDisplayIds = 0
 ArenaReplay.ActorVisual.CreatureSilhouette.UseNpcRaceFallbackDisplays = 1

@@ -1276,20 +1276,41 @@ namespace
         uint64 viewerRaw = viewer->GetGUID().GetRawValue();
         std::vector<uint8> oldRaw = ReplayGuidRawBytes(viewerRaw);
         std::vector<uint8> oldPacked = ReplayGuidPackedBytes(viewerRaw);
-        uint32 replacements = 0;
 
-        if (sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid", true))
+        // Important: do not blindly byte-rewrite player GUIDs inside arbitrary
+        // 3.3.5a packets.  The same byte sequence can legally appear inside
+        // movement, aura, item, damage, packed-object, or compressed update
+        // payloads as non-GUID data.  The previous raw remap path could corrupt
+        // packet structure and trigger client ACCESS_VIOLATION crashes.
+        //
+        // Until opcode-aware object-update rewriting exists, the safe behavior is
+        // to skip packets that still reference the live viewer's own GUID.  This
+        // intentionally omits the viewer's replay actor from packet visuals, but
+        // prevents the hidden spectator shell from turning into floating weapons
+        // or becoming the packet target at replay end.
+        bool containsViewerGuid = ReplayPacketContainsBytes(data, oldPacked) || ReplayPacketContainsBytes(data, oldRaw);
+        if (containsViewerGuid && sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.SkipViewerGuidPackets", true))
         {
+            ++session.viewerGuidSkipPacketCount;
+            if (!session.viewerGuidSkipLogged || ReplayDebugVerbose())
+            {
+                LOG_WARN("server.loading", "[RTG][REPLAY][PACKET_VIEWER_GUID_SKIP] replay={} viewerGuid={} opcode={} skipped={} reason=viewer_guid_packet result=skip",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    uint32(source.GetOpcode()),
+                    session.viewerGuidSkipPacketCount);
+                session.viewerGuidSkipLogged = true;
+            }
+            return false;
+        }
+
+        uint32 replacements = 0;
+        if (!containsViewerGuid && sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.RemapViewerGuid", false))
+        {
+            // Kept only for future opcode-aware implementations.  With the safe
+            // skip above this branch should not run for viewer packets.
             if (session.viewerReplayVisualGuidRaw == 0)
                 session.viewerReplayVisualGuidRaw = MakeReplayViewerVisualGuidRaw(viewerRaw);
-
-            uint64 fakeRaw = session.viewerReplayVisualGuidRaw;
-            std::vector<uint8> newRaw = ReplayGuidRawBytes(fakeRaw);
-            std::vector<uint8> newPacked = ReplayGuidPackedBytes(fakeRaw);
-
-            if (newPacked.size() == oldPacked.size())
-                replacements += ReplaceReplayPacketBytes(data, oldPacked, newPacked);
-            replacements += ReplaceReplayPacketBytes(data, oldRaw, newRaw);
         }
 
         bool stillContainsViewerGuid = ReplayPacketContainsBytes(data, oldPacked) || ReplayPacketContainsBytes(data, oldRaw);
