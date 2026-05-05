@@ -315,6 +315,14 @@ struct ActiveReplaySession
     uint32 priorVirtualItemSlot[3] = { 0, 0, 0 };
     bool virtualItemsStripped = false;
     uint64 viewerReplayVisualGuidRaw = 0;
+    std::unordered_map<uint64, uint64> syntheticReplayVisualGuids;
+    uint32 syntheticActorsPlanned = 0;
+    bool syntheticPlanLogged = false;
+    std::unordered_set<uint64> syntheticReplayVisualsCreated;
+    uint32 nextSyntheticSyncMs = 0;
+    uint32 syntheticVisualCreateCount = 0;
+    uint32 syntheticVisualMoveCount = 0;
+    bool syntheticDestroySent = false;
     uint32 viewerGuidRemapPacketCount = 0;
     uint32 viewerGuidSkipPacketCount = 0;
     bool viewerGuidRemapLogged = false;
@@ -364,7 +372,11 @@ namespace
     static bool ReplayCreatureSilhouetteUsePlayerDisplayIds();
     static uint32 ResolveCreatureSilhouetteDisplay(ReplayActorAppearanceSnapshot const* snapshot, ActorTrack const& track, bool winnerSide, char const*& reason);
     static ReplayActorVisualBackend GetReplayActorVisualBackend();
+    static bool ReplaySyntheticReplayPacketEmitterBackendEnabled();
     static bool ReplayRecordedPacketVisualBackendEnabled();
+    static void EnsureSyntheticReplayActorsCreated(Player* viewer, MatchRecord const& match, ActiveReplaySession& session);
+    static void SyncSyntheticReplayActors(Player* viewer, MatchRecord const& match, ActiveReplaySession& session, uint32 nowMs, bool forceImmediate = false);
+    static void DestroySyntheticReplayActorVisuals(Player* viewer, ActiveReplaySession& session);
     static uint32 ResolveReplayMapId(uint32 nativeMapId);
     static uint32 AllocateReplayPrivatePhaseMask(uint64 viewerKey);
     static bool ApplyReplayViewerPrivatePhase(Player* viewer, ActiveReplaySession& session);
@@ -1060,14 +1072,25 @@ namespace
 
     static bool ReplayCloneModeEnabled()
     {
+        ReplayActorVisualBackend backend = GetReplayActorVisualBackend();
+        if (backend != RTG_REPLAY_ACTOR_VISUAL_CREATURE_SILHOUETTE)
+            return false;
+
         return sConfigMgr->GetOption<uint32>("ArenaReplay.Playback.Mode", 1u) == 1 &&
-            sConfigMgr->GetOption<bool>("ArenaReplay.Playback.CloneMode.Enable", true);
+            sConfigMgr->GetOption<bool>("ArenaReplay.Playback.CloneMode.Enable", true) &&
+            sConfigMgr->GetOption<bool>("ArenaReplay.CloneScene.Enable", true);
+    }
+
+    static bool ReplaySyntheticReplayPacketEmitterBackendEnabled()
+    {
+        return GetReplayActorVisualBackend() == RTG_REPLAY_ACTOR_VISUAL_SYNTHETIC_PLAYER_OBJECT_EXPERIMENTAL &&
+            sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Enable", true);
     }
 
     static bool ReplayRecordedPacketVisualBackendEnabled()
     {
-        return GetReplayActorVisualBackend() == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM ||
-            sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.Enable", false);
+        return GetReplayActorVisualBackend() == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM &&
+            sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.RecordedPacketStream.Enable", true);
     }
 
     static bool ReplayCloneModeSendRecordedWorldPackets()
@@ -1156,6 +1179,9 @@ namespace
 
     static bool IsReplayPacketOpcodeAllowedForPlayback(uint16 opcode)
     {
+        if (ReplaySyntheticReplayPacketEmitterBackendEnabled())
+            return false;
+
         switch (opcode)
         {
             case CMSG_CAST_SPELL:
@@ -2722,7 +2748,7 @@ namespace
 
     static ReplayActorVisualBackend GetReplayActorVisualBackend()
     {
-        uint32 backend = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.Backend", uint32(RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM));
+        uint32 backend = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.Backend", uint32(RTG_REPLAY_ACTOR_VISUAL_SYNTHETIC_PLAYER_OBJECT_EXPERIMENTAL));
         if (backend > uint32(RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM))
             backend = uint32(RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM);
         return ReplayActorVisualBackend(backend);
@@ -2737,7 +2763,7 @@ namespace
             case RTG_REPLAY_ACTOR_VISUAL_PLAYERBOT_BODY_EXPERIMENTAL:
                 return "playerbot_body_experimental";
             case RTG_REPLAY_ACTOR_VISUAL_SYNTHETIC_PLAYER_OBJECT_EXPERIMENTAL:
-                return "synthetic_player_object_experimental";
+                return "synthetic_replay_packet_emitter";
             case RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM:
                 return "recorded_packet_stream";
             default:
@@ -2753,7 +2779,7 @@ namespace
     static void LogReplayPlayerBodyPlan(Player* viewer, MatchRecord const& match, ActiveReplaySession const& session)
     {
         ReplayActorVisualBackend backend = GetReplayActorVisualBackend();
-        if (backend == RTG_REPLAY_ACTOR_VISUAL_CREATURE_SILHOUETTE || backend == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM)
+        if (backend != RTG_REPLAY_ACTOR_VISUAL_PLAYERBOT_BODY_EXPERIMENTAL)
             return;
 
         bool backendAvailable = false;
@@ -2824,6 +2850,464 @@ namespace
             viewer ? viewer->GetGUID().GetCounter() : 0,
             GetReplayActorVisualBackendName(backend),
             planned);
+    }
+
+
+    static uint64 MakeSyntheticReplayVisualGuidRaw(ActiveReplaySession const& session, uint64 /*originalGuid*/, uint32 index)
+    {
+        // Session-local replay visual identity.  Use a real HighGuid::Unit-style
+        // raw GUID instead of a low/player-shaped GUID.  Player-shaped GUIDs can
+        // be interpreted by the client as player objects; this backend is meant
+        // to create remote UNIT visuals only, never controlled/player movers.
+        uint32 unitEntry = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitEntry", 98501u) & 0x00FFFFFFu;
+        uint32 lowBase = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.GuidLowBase", 0x00E00000u) & 0x00FFFF00u;
+        uint32 low = (lowBase | ((session.replayId & 0x0FFFu) << 8) | (index & 0x00FFu)) & 0x00FFFFFFu;
+        if (low == 0)
+            low = uint32(index & 0x00FFu) + 1u;
+
+        // Trinity/AzerothCore 3.3.5 creature/unit GUID layout:
+        // (HighGuid::Unit/Creature 0xF130 << 48) | (entry << 24) | lowGuid.
+        return (uint64(0xF130u) << 48) | (uint64(unitEntry) << 24) | uint64(low);
+    }
+
+    static bool ReplaySyntheticUsePlayerDisplayIds()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UsePlayerDisplayIds", false);
+    }
+
+    static bool ReplaySyntheticUseNpcRaceFallbackDisplays()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseNpcRaceFallbackDisplays", true);
+    }
+
+    static bool ReplaySyntheticUseShapeshiftDisplays()
+    {
+        return sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseShapeshiftDisplays", true);
+    }
+
+    static void LogSyntheticReplayPacketEmitterPlan(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
+    {
+        bool emitterEnabled = sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Enable", true);
+        bool destroyOnTeardown = sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.DestroyVisualsOnTeardown", true);
+        bool rawPacketsDisabled = !ReplayRecordedPacketVisualBackendEnabled();
+        uint32 planned = 0;
+
+        session.syntheticReplayVisualGuids.clear();
+        session.syntheticActorsPlanned = 0;
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_BACKEND] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} emitterEnable={} rawPacketsDisabled={} clonesDisabled=1 destroyOnTeardown={} result=enabled_foundation",
+            session.replayId,
+            viewer ? viewer->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            session.replayPhaseMask,
+            emitterEnabled ? 1 : 0,
+            rawPacketsDisabled ? 1 : 0,
+            destroyOnTeardown ? 1 : 0);
+
+        for (ReplayActorSelectionRef const& ref : BuildPlayableReplayActorSelections(match))
+        {
+            auto const* tracks = SelectTracks(match, ref.winnerSide);
+            if (!tracks || ref.trackIndex >= tracks->size())
+                continue;
+
+            ActorTrack const& track = (*tracks)[ref.trackIndex];
+            ReplayActorAppearanceSnapshot const* snapshot = FindReplayActorAppearanceSnapshot(match, track.guid);
+            uint32 visualIndex = planned + 1;
+            uint64 visualGuid = MakeSyntheticReplayVisualGuidRaw(session, track.guid, visualIndex);
+            session.syntheticReplayVisualGuids[track.guid] = visualGuid;
+            uint32 equipmentCount = snapshot ? CountReplaySnapshotEquipmentEntries(*snapshot) : 0;
+
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_GUID_MAP] replay={} viewerGuid={} originalGuid={} visualGuid={} actorName={} visualIndex={} winnerSide={} result=ok",
+                session.replayId,
+                viewer ? viewer->GetGUID().GetCounter() : 0,
+                track.guid,
+                visualGuid,
+                track.name,
+                visualIndex,
+                ref.winnerSide ? 1 : 0);
+
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_ACTOR_PLAN] replay={} viewerGuid={} originalGuid={} visualGuid={} actorName={} race={} class={} gender={} skin={} face={} hairStyle={} hairColor={} facialHair={} displayId={} nativeDisplayId={} shapeshiftDisplayId={} shapeshiftForm={} equipmentCount={} headEntry={} shouldersEntry={} chestEntry={} waistEntry={} legsEntry={} feetEntry={} wristsEntry={} handsEntry={} backEntry={} tabardEntry={} mainhandEntry={} offhandEntry={} rangedEntry={} frames={} result=planned_only",
+                session.replayId,
+                viewer ? viewer->GetGUID().GetCounter() : 0,
+                track.guid,
+                visualGuid,
+                track.name,
+                snapshot ? uint32(snapshot->race) : uint32(track.race),
+                snapshot ? uint32(snapshot->playerClass) : uint32(track.playerClass),
+                snapshot ? uint32(snapshot->gender) : uint32(track.gender),
+                snapshot ? uint32(snapshot->skin) : 0,
+                snapshot ? uint32(snapshot->face) : 0,
+                snapshot ? uint32(snapshot->hairStyle) : 0,
+                snapshot ? uint32(snapshot->hairColor) : 0,
+                snapshot ? uint32(snapshot->facialHair) : 0,
+                snapshot ? snapshot->displayId : 0,
+                snapshot ? snapshot->nativeDisplayId : 0,
+                snapshot ? snapshot->shapeshiftDisplayId : 0,
+                snapshot ? snapshot->shapeshiftForm : 0,
+                equipmentCount,
+                snapshot ? snapshot->headItemEntry : 0,
+                snapshot ? snapshot->shouldersItemEntry : 0,
+                snapshot ? snapshot->chestItemEntry : 0,
+                snapshot ? snapshot->waistItemEntry : 0,
+                snapshot ? snapshot->legsItemEntry : 0,
+                snapshot ? snapshot->feetItemEntry : 0,
+                snapshot ? snapshot->wristsItemEntry : 0,
+                snapshot ? snapshot->handsItemEntry : 0,
+                snapshot ? snapshot->backItemEntry : 0,
+                snapshot ? snapshot->tabardItemEntry : 0,
+                snapshot ? snapshot->mainhandItemEntry : 0,
+                snapshot ? snapshot->offhandItemEntry : 0,
+                snapshot ? snapshot->rangedItemEntry : 0,
+                uint32(track.frames.size()));
+            ++planned;
+        }
+
+        session.syntheticActorsPlanned = planned;
+        session.syntheticPlanLogged = true;
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_SCENE] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} plannedActors={} packetStreamPackets={} result=synthetic_unit_visual_packets_ready",
+            session.replayId,
+            viewer ? viewer->GetGUID().GetCounter() : 0,
+            session.nativeMapId,
+            session.replayMapId,
+            session.replayPhaseMask,
+            planned,
+            match.packets.size());
+    }
+
+
+    static uint32 FloatToUpdateUInt32(float value)
+    {
+        uint32 out = 0;
+        static_assert(sizeof(out) == sizeof(value), "float update packing expects uint32 size");
+        std::memcpy(&out, &value, sizeof(out));
+        return out;
+    }
+
+    static void AppendReplayPackedGuidRaw(WorldPacket& packet, uint64 raw)
+    {
+        uint8 mask = 0;
+        std::array<uint8, 8> bytes{};
+        for (uint8 i = 0; i < 8; ++i)
+        {
+            bytes[i] = uint8((raw >> (uint64(i) * 8u)) & 0xFFu);
+            if (bytes[i] != 0)
+                mask |= uint8(1u << i);
+        }
+
+        packet << mask;
+        for (uint8 i = 0; i < 8; ++i)
+            if (mask & uint8(1u << i))
+                packet << bytes[i];
+    }
+
+    static void AppendSyntheticUpdateValues(WorldPacket& packet, std::vector<std::pair<uint16, uint32>> values)
+    {
+        if (values.empty())
+        {
+            packet << uint8(0);
+            return;
+        }
+
+        std::sort(values.begin(), values.end(), [](auto const& a, auto const& b)
+        {
+            return a.first < b.first;
+        });
+
+        values.erase(std::unique(values.begin(), values.end(), [](auto const& a, auto const& b)
+        {
+            return a.first == b.first;
+        }), values.end());
+
+        uint16 maxIndex = values.back().first;
+        uint8 blocks = uint8((maxIndex / 32u) + 1u);
+        std::vector<uint32> masks(blocks, 0);
+        for (auto const& value : values)
+            masks[value.first / 32u] |= uint32(1u << (value.first % 32u));
+
+        packet << blocks;
+        for (uint32 mask : masks)
+            packet << mask;
+        for (auto const& value : values)
+            packet << value.second;
+    }
+
+    static uint32 GetSyntheticReplayActorDisplay(ReplayActorAppearanceSnapshot const* snapshot, ActorTrack const& track, bool winnerSide, char const*& reason)
+    {
+        reason = "fallback";
+
+        if (snapshot && ReplaySyntheticUseShapeshiftDisplays() && snapshot->shapeshiftDisplayId && snapshot->shapeshiftForm && !IsKnownInvisibleReplayDisplay(snapshot->shapeshiftDisplayId))
+        {
+            reason = "shapeshift_display";
+            return snapshot->shapeshiftDisplayId;
+        }
+
+        if (snapshot && ReplaySyntheticUsePlayerDisplayIds())
+        {
+            uint32 playerDisplay = snapshot->displayId ? snapshot->displayId : snapshot->nativeDisplayId;
+            if (playerDisplay && !IsKnownInvisibleReplayDisplay(playerDisplay))
+            {
+                reason = "player_display_config";
+                return playerDisplay;
+            }
+        }
+
+        if (ReplaySyntheticUseNpcRaceFallbackDisplays())
+        {
+            reason = "npc_race_fallback";
+            return ResolveCreatureSilhouetteNpcDisplay(snapshot, track, winnerSide);
+        }
+
+        return ResolveCreatureSilhouetteDisplay(snapshot, track, winnerSide, reason);
+    }
+
+    static void BuildSyntheticReplayUnitValues(std::vector<std::pair<uint16, uint32>>& values, uint64 visualGuid, ActorTrack const& track, ReplayActorAppearanceSnapshot const* snapshot, bool winnerSide)
+    {
+        char const* displayReason = "unknown";
+        uint32 displayId = GetSyntheticReplayActorDisplay(snapshot, track, winnerSide, displayReason);
+        uint32 nativeDisplayId = displayId;
+        uint32 race = snapshot ? uint32(snapshot->race) : uint32(track.race);
+        uint32 playerClass = snapshot ? uint32(snapshot->playerClass) : uint32(track.playerClass);
+        uint32 gender = snapshot ? uint32(snapshot->gender) : uint32(track.gender);
+        uint32 bytes0 = (race & 0xFFu) | ((playerClass & 0xFFu) << 8) | ((gender & 0xFFu) << 16);
+        uint32 unitFlags = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags", 33555202u);
+        uint32 unitFlags2 = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags2", 0u);
+        uint32 faction = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Faction", 35u);
+        uint32 unitEntry = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitEntry", 98501u);
+        uint32 level = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Level", 19u);
+        uint32 health = sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Health", 100u);
+        uint32 mainhand = snapshot ? snapshot->mainhandItemEntry : 0;
+        uint32 offhand = snapshot ? snapshot->offhandItemEntry : 0;
+        uint32 ranged = snapshot ? snapshot->rangedItemEntry : 0;
+
+        // 3.3.5 update field indexes. General type value 9 is Unit; player is
+        // intentionally not used here so the replay actor cannot become the
+        // client's active mover/controlled object.
+        values.push_back({0, uint32(visualGuid & 0xFFFFFFFFu)});                 // OBJECT_FIELD_GUID low
+        values.push_back({1, uint32((visualGuid >> 32) & 0xFFFFFFFFu)});        // OBJECT_FIELD_GUID high
+        values.push_back({2, 9u});                                              // OBJECT_FIELD_TYPE = Unit
+        values.push_back({3, unitEntry});                                       // OBJECT_FIELD_ENTRY
+        values.push_back({4, FloatToUpdateUInt32(1.0f)});                       // OBJECT_FIELD_SCALE_X
+        values.push_back({23, bytes0});                                         // UNIT_FIELD_BYTES_0
+        values.push_back({24, health});                                         // UNIT_FIELD_HEALTH
+        values.push_back({32, health});                                         // UNIT_FIELD_MAXHEALTH
+        values.push_back({54, level});                                          // UNIT_FIELD_LEVEL
+        values.push_back({55, faction});                                        // UNIT_FIELD_FACTIONTEMPLATE
+        values.push_back({56, mainhand});                                       // UNIT_VIRTUAL_ITEM_SLOT_ID 0
+        values.push_back({57, offhand});                                        // UNIT_VIRTUAL_ITEM_SLOT_ID 1
+        values.push_back({58, ranged});                                         // UNIT_VIRTUAL_ITEM_SLOT_ID 2
+        values.push_back({59, unitFlags});                                      // UNIT_FIELD_FLAGS
+        values.push_back({60, unitFlags2});                                     // UNIT_FIELD_FLAGS_2
+        values.push_back({67, displayId});                                      // UNIT_FIELD_DISPLAYID
+        values.push_back({68, nativeDisplayId});                                // UNIT_FIELD_NATIVEDISPLAYID
+        values.push_back({74, 0u});                                             // UNIT_FIELD_BYTES_1
+        values.push_back({79, 0u});                                             // UNIT_DYNAMIC_FLAGS
+        values.push_back({82, 0u});                                             // UNIT_NPC_FLAGS
+        values.push_back({146, FloatToUpdateUInt32(1.0f)});                     // UNIT_FIELD_HOVERHEIGHT
+    }
+
+    static void AppendSyntheticReplayPositionBlock(WorldPacket& packet, ActorFrame const& frame)
+    {
+        // Minimal non-living position block. This is intentionally safer than a
+        // living movement block because it cannot assign active mover/control to
+        // the viewer client.
+        packet << uint16(0x0040); // UPDATEFLAG_HAS_POSITION
+        packet << frame.x << frame.y << frame.z << frame.o;
+    }
+
+    static WorldPacket BuildSyntheticReplayCreateUnitPacket(uint64 visualGuid, ActorTrack const& track, ReplayActorAppearanceSnapshot const* snapshot, bool winnerSide, ActorFrame const& frame)
+    {
+        WorldPacket packet(SMSG_UPDATE_OBJECT, 512);
+        packet << uint32(1);   // update count
+        packet << uint8(0);    // no transport
+        packet << uint8(3);    // UPDATETYPE_CREATE_OBJECT2
+        AppendReplayPackedGuidRaw(packet, visualGuid);
+        packet << uint8(3);    // TYPEID_UNIT
+        AppendSyntheticReplayPositionBlock(packet, frame);
+
+        std::vector<std::pair<uint16, uint32>> values;
+        BuildSyntheticReplayUnitValues(values, visualGuid, track, snapshot, winnerSide);
+        AppendSyntheticUpdateValues(packet, std::move(values));
+        return packet;
+    }
+
+    static WorldPacket BuildSyntheticReplayMovementPacket(uint64 visualGuid, ActorFrame const& frame)
+    {
+        WorldPacket packet(SMSG_UPDATE_OBJECT, 64);
+        packet << uint32(1);   // update count
+        packet << uint8(0);    // no transport
+        packet << uint8(1);    // UPDATETYPE_MOVEMENT
+        AppendReplayPackedGuidRaw(packet, visualGuid);
+        AppendSyntheticReplayPositionBlock(packet, frame);
+        return packet;
+    }
+
+    static WorldPacket BuildSyntheticReplayDestroyPacket(std::vector<uint64> const& visualGuids)
+    {
+        WorldPacket packet(SMSG_UPDATE_OBJECT, 16 + visualGuids.size() * 9);
+        packet << uint32(1);   // one out-of-range update block
+        packet << uint8(0);    // no transport
+        packet << uint8(4);    // UPDATETYPE_OUT_OF_RANGE_OBJECTS
+        packet << uint32(visualGuids.size());
+        for (uint64 visualGuid : visualGuids)
+            AppendReplayPackedGuidRaw(packet, visualGuid);
+        return packet;
+    }
+
+    static bool GetSyntheticReplayActorFrame(ActorTrack const& track, uint32 nowMs, ActorFrame& frame)
+    {
+        bool ok = false;
+        frame = GetInterpolatedActorFrame(track, nowMs, ok);
+        return ok;
+    }
+
+    static void EnsureSyntheticReplayActorsCreated(Player* viewer, MatchRecord const& match, ActiveReplaySession& session)
+    {
+        if (!viewer || !viewer->GetSession() || !ReplaySyntheticReplayPacketEmitterBackendEnabled())
+            return;
+
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.EmitUnitVisualPackets", true))
+            return;
+
+        if (session.syntheticReplayVisualGuids.empty())
+            LogSyntheticReplayPacketEmitterPlan(viewer, match, session);
+
+        uint32 createdThisPass = 0;
+        for (ReplayActorSelectionRef const& ref : BuildPlayableReplayActorSelections(match))
+        {
+            auto const* tracks = SelectTracks(match, ref.winnerSide);
+            if (!tracks || ref.trackIndex >= tracks->size())
+                continue;
+
+            ActorTrack const& track = (*tracks)[ref.trackIndex];
+            auto guidIt = session.syntheticReplayVisualGuids.find(track.guid);
+            if (guidIt == session.syntheticReplayVisualGuids.end())
+                continue;
+
+            uint64 visualGuid = guidIt->second;
+            if (session.syntheticReplayVisualsCreated.find(visualGuid) != session.syntheticReplayVisualsCreated.end())
+                continue;
+
+            ActorFrame frame;
+            if (!GetSyntheticReplayActorFrame(track, session.replayPlaybackMs ? session.replayPlaybackMs : session.cloneSceneStartMs, frame))
+                continue;
+
+            ReplayActorAppearanceSnapshot const* snapshot = FindReplayActorAppearanceSnapshot(match, track.guid);
+            WorldPacket packet = BuildSyntheticReplayCreateUnitPacket(visualGuid, track, snapshot, ref.winnerSide, frame);
+            viewer->GetSession()->SendPacket(&packet);
+            session.syntheticReplayVisualsCreated.insert(visualGuid);
+            ++session.syntheticVisualCreateCount;
+            ++createdThisPass;
+
+            char const* displayReason = "unknown";
+            uint32 syntheticDisplay = GetSyntheticReplayActorDisplay(snapshot, track, ref.winnerSide, displayReason);
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_DISPLAY] replay={} viewerGuid={} originalGuid={} visualGuid={} actorName={} displayId={} displaySource={} usePlayerDisplayIds={} useNpcFallback={} result=ok",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                track.guid,
+                visualGuid,
+                track.name,
+                syntheticDisplay,
+                displayReason,
+                ReplaySyntheticUsePlayerDisplayIds() ? 1 : 0,
+                ReplaySyntheticUseNpcRaceFallbackDisplays() ? 1 : 0);
+
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_ACTOR_CREATE] replay={} viewerGuid={} originalGuid={} visualGuid={} actorName={} x={} y={} z={} o={} displayId={} equipmentCount={} result=sent",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                track.guid,
+                visualGuid,
+                track.name,
+                frame.x,
+                frame.y,
+                frame.z,
+                frame.o,
+                syntheticDisplay,
+                snapshot ? CountReplaySnapshotEquipmentEntries(*snapshot) : 0);
+        }
+
+        if (createdThisPass || ReplayDebugVerbose())
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_CREATE_SUMMARY] replay={} viewerGuid={} createdThisPass={} totalCreated={} plannedActors={} result={}",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                createdThisPass,
+                session.syntheticVisualCreateCount,
+                session.syntheticActorsPlanned,
+                session.syntheticVisualCreateCount == session.syntheticActorsPlanned ? "ok" : "partial");
+        }
+    }
+
+    static void SyncSyntheticReplayActors(Player* viewer, MatchRecord const& match, ActiveReplaySession& session, uint32 nowMs, bool forceImmediate)
+    {
+        if (!viewer || !viewer->GetSession() || session.teardownInProgress || !ReplaySyntheticReplayPacketEmitterBackendEnabled())
+            return;
+
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.EmitUnitVisualPackets", true))
+            return;
+
+        EnsureSyntheticReplayActorsCreated(viewer, match, session);
+
+        uint32 syncMs = std::max<uint32>(50u, sConfigMgr->GetOption<uint32>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.SyncMs", 125u));
+        if (!forceImmediate && session.nextSyntheticSyncMs > nowMs)
+            return;
+        session.nextSyntheticSyncMs = nowMs + syncMs;
+
+        uint32 moved = 0;
+        for (ReplayActorSelectionRef const& ref : BuildPlayableReplayActorSelections(match))
+        {
+            auto const* tracks = SelectTracks(match, ref.winnerSide);
+            if (!tracks || ref.trackIndex >= tracks->size())
+                continue;
+
+            ActorTrack const& track = (*tracks)[ref.trackIndex];
+            auto guidIt = session.syntheticReplayVisualGuids.find(track.guid);
+            if (guidIt == session.syntheticReplayVisualGuids.end())
+                continue;
+
+            uint64 visualGuid = guidIt->second;
+            if (session.syntheticReplayVisualsCreated.find(visualGuid) == session.syntheticReplayVisualsCreated.end())
+                continue;
+
+            ActorFrame frame;
+            if (!GetSyntheticReplayActorFrame(track, nowMs, frame))
+                continue;
+
+            WorldPacket packet = BuildSyntheticReplayMovementPacket(visualGuid, frame);
+            viewer->GetSession()->SendPacket(&packet);
+            ++moved;
+        }
+
+        session.syntheticVisualMoveCount += moved;
+        if ((moved != 0 && ReplayDebugEnabled(ReplayDebugFlag::Actors) && ReplayDebugVerbose()) || forceImmediate)
+        {
+            LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_ACTOR_SYNC] replay={} viewerGuid={} moved={} totalMovePackets={} nowMs={} result=ok",
+                session.replayId,
+                viewer->GetGUID().GetCounter(),
+                moved,
+                session.syntheticVisualMoveCount,
+                nowMs);
+        }
+    }
+
+    static void DestroySyntheticReplayActorVisuals(Player* viewer, ActiveReplaySession& session)
+    {
+        if (!viewer || !viewer->GetSession() || session.syntheticDestroySent || session.syntheticReplayVisualsCreated.empty())
+            return;
+
+        if (!sConfigMgr->GetOption<bool>("ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.DestroyVisualsOnTeardown", true))
+            return;
+
+        std::vector<uint64> visualGuids(session.syntheticReplayVisualsCreated.begin(), session.syntheticReplayVisualsCreated.end());
+        WorldPacket packet = BuildSyntheticReplayDestroyPacket(visualGuids);
+        viewer->GetSession()->SendPacket(&packet);
+        session.syntheticDestroySent = true;
+
+        LOG_INFO("server.loading", "[RTG][REPLAY][SYNTHETIC_DESTROY] replay={} viewerGuid={} destroyed={} result=sent",
+            session.replayId,
+            viewer->GetGUID().GetCounter(),
+            uint32(visualGuids.size()));
     }
 
     static bool ReplayCameraAnchorRequired()
@@ -3399,6 +3883,9 @@ namespace
 
     static bool IsReplayTimelineComplete(MatchRecord const& match, ActiveReplaySession const& session)
     {
+        if (ReplaySyntheticReplayPacketEmitterBackendEnabled())
+            return session.lastPlayableActorFrameMs == 0 || session.replayPlaybackMs >= session.lastPlayableActorFrameMs;
+
         if (!match.packets.empty())
             return false;
 
@@ -3426,7 +3913,7 @@ namespace
         session.cloneSceneStartMs = haveActorFrames && ReplayCloneModeStartAtFirstActorFrame() ? firstFrameMs : 0;
         session.matchOpenMs = haveActorFrames && ReplayCloneModeMatchOpenFromFirstActorFrame() ? firstFrameMs : session.cloneSceneStartMs;
 
-        if (ReplayCloneModeEnabled() && ReplayCloneModeTrimPreMatchDeadAir() && session.cloneSceneStartMs != 0)
+        if ((ReplayCloneModeEnabled() || ReplaySyntheticReplayPacketEmitterBackendEnabled()) && ReplayCloneModeTrimPreMatchDeadAir() && session.cloneSceneStartMs != 0)
             session.replayPlaybackMs = session.cloneSceneStartMs;
 
         session.cloneTimelineInitialized = true;
@@ -3656,8 +4143,28 @@ namespace
             session.replayPhaseMask,
             GetReplayActorVisualBackendName(visualBackend),
             visualBackend == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM ? "recorded_packet_stream_authoritative" :
-                (visualBackend == RTG_REPLAY_ACTOR_VISUAL_CREATURE_SILHOUETTE ? "creature_silhouette_debug" : "experimental_planned_only"));
+                (visualBackend == RTG_REPLAY_ACTOR_VISUAL_SYNTHETIC_PLAYER_OBJECT_EXPERIMENTAL ? "synthetic_replay_packet_emitter_foundation" :
+                    (visualBackend == RTG_REPLAY_ACTOR_VISUAL_CREATURE_SILHOUETTE ? "creature_silhouette_debug" : "experimental_planned_only")));
         LogReplayPlayerBodyPlan(viewer, match, session);
+
+        if (visualBackend == RTG_REPLAY_ACTOR_VISUAL_SYNTHETIC_PLAYER_OBJECT_EXPERIMENTAL)
+        {
+            if (!ReplaySyntheticReplayPacketEmitterBackendEnabled())
+            {
+                LOG_ERROR("server.loading", "[RTG][REPLAY][SYNTHETIC_BACKEND] replay={} viewerGuid={} nativeMap={} replayMap={} phase={} result=disabled",
+                    session.replayId,
+                    viewer->GetGUID().GetCounter(),
+                    session.nativeMapId,
+                    session.replayMapId,
+                    session.replayPhaseMask);
+                return false;
+            }
+
+            LogSyntheticReplayPacketEmitterPlan(viewer, match, session);
+            EnsureSyntheticReplayActorsCreated(viewer, match, session);
+            session.cloneSceneBuilt = true;
+            return true;
+        }
 
         if (visualBackend == RTG_REPLAY_ACTOR_VISUAL_RECORDED_PACKET_STREAM)
         {
@@ -4876,6 +5383,7 @@ namespace
         auto liveIt = activeReplaySessions.find(viewerKey);
         if (liveIt != activeReplaySessions.end())
         {
+            DestroySyntheticReplayActorVisuals(player, liveIt->second);
             DespawnReplayDynamicObjects(player, liveIt->second);
             DespawnReplayActorClones(player, liveIt->second);
             ResetActorReplayView(player, liveIt->second);
@@ -4941,6 +5449,7 @@ namespace
         auto it = activeReplaySessions.find(player->GetGUID().GetCounter());
         if (it != activeReplaySessions.end())
         {
+            DestroySyntheticReplayActorVisuals(player, it->second);
             DespawnReplayDynamicObjects(player, it->second);
             DespawnReplayActorClones(player, it->second);
             ResetActorReplayView(player, it->second);
@@ -5069,10 +5578,10 @@ namespace
         }
 
         uint64 const viewerActorGuid = replayer->GetGUID().GetRawValue();
-        bool packetVisualBackend = ReplayRecordedPacketVisualBackendEnabled();
-        Creature* selectedClone = packetVisualBackend ? nullptr : FindReplayClone(replayer, session, track->guid);
+        bool noCloneVisualBackend = ReplayRecordedPacketVisualBackendEnabled() || ReplaySyntheticReplayPacketEmitterBackendEnabled();
+        Creature* selectedClone = noCloneVisualBackend ? nullptr : FindReplayClone(replayer, session, track->guid);
         bool selectedSelf = track->guid == viewerActorGuid;
-        if (selectedSelf && !selectedClone && !packetVisualBackend)
+        if (selectedSelf && !selectedClone && !noCloneVisualBackend)
         {
             uint32 fallbackFlatIndex = flatIndex;
             if (ActorTrack const* fallbackTrack = SelectFirstReplayActorWithClone(replayer, match, session, viewerActorGuid, &fallbackFlatIndex))
@@ -5760,7 +6269,7 @@ public:
             }
 
             BindReplayViewpoint(replayer, match, session);
-            uint32 actorStartMs = ReplayCloneModeEnabled() ? session.replayPlaybackMs : bg->GetStartTime();
+            uint32 actorStartMs = (ReplayCloneModeEnabled() || ReplaySyntheticReplayPacketEmitterBackendEnabled()) ? session.replayPlaybackMs : bg->GetStartTime();
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, actorStartMs, true);
             if (!actorViewApplied && ShouldCancelReplayForCameraAnchor(session))
             {
@@ -5792,19 +6301,22 @@ public:
         // but cap burst size to avoid hitching and client overload on older replays.
         uint32 packetsSentThisUpdate = 0;
         uint32 packetBudgetPerUpdate = std::max<uint32>(15u, session.packetBudgetPerUpdate);
-        while (!match.packets.empty() && match.packets.front().timestamp <= bg->GetStartTime() && packetsSentThisUpdate < packetBudgetPerUpdate)
+        if (ReplayRecordedPacketVisualBackendEnabled())
         {
-            WorldPacket* myPacket = &match.packets.front().packet;
-            if (IsReplayPacketOpcodeAllowedForPlayback(myPacket->GetOpcode()))
+            while (!match.packets.empty() && match.packets.front().timestamp <= bg->GetStartTime() && packetsSentThisUpdate < packetBudgetPerUpdate)
             {
-                WorldPacket safePacket;
-                if (BuildViewerSafeReplayPacket(*myPacket, replayer, session, safePacket))
+                WorldPacket* myPacket = &match.packets.front().packet;
+                if (IsReplayPacketOpcodeAllowedForPlayback(myPacket->GetOpcode()))
                 {
-                    replayer->GetSession()->SendPacket(&safePacket);
-                    ++packetsSentThisUpdate;
+                    WorldPacket safePacket;
+                    if (BuildViewerSafeReplayPacket(*myPacket, replayer, session, safePacket))
+                    {
+                        replayer->GetSession()->SendPacket(&safePacket);
+                        ++packetsSentThisUpdate;
+                    }
                 }
+                match.packets.pop_front();
             }
-            match.packets.pop_front();
         }
         StripReplayViewerVisualEquipment(replayer, session);
 
@@ -5860,6 +6372,7 @@ public:
             if (session.teardownInProgress)
                 return;
             session.replayPlaybackMs = bg->GetStartTime();
+            SyncSyntheticReplayActors(replayer, match, session, bg->GetStartTime(), false);
             SyncReplayActorClones(replayer, match, session, bg->GetStartTime());
             UpdateReplayDynamicObjects(replayer, match, session);
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, bg->GetStartTime());
@@ -7388,19 +7901,22 @@ namespace
 
             uint32 packetsSentThisUpdate = 0;
             uint32 packetBudgetPerUpdate = std::max<uint32>(15u, session.packetBudgetPerUpdate);
-            while (!match.packets.empty() && match.packets.front().timestamp <= session.replayPlaybackMs && packetsSentThisUpdate < packetBudgetPerUpdate)
+            if (ReplayRecordedPacketVisualBackendEnabled())
             {
-                WorldPacket* myPacket = &match.packets.front().packet;
-                if (IsReplayPacketOpcodeAllowedForPlayback(myPacket->GetOpcode()))
+                while (!match.packets.empty() && match.packets.front().timestamp <= session.replayPlaybackMs && packetsSentThisUpdate < packetBudgetPerUpdate)
                 {
-                    WorldPacket safePacket;
-                    if (BuildViewerSafeReplayPacket(*myPacket, replayer, session, safePacket))
+                    WorldPacket* myPacket = &match.packets.front().packet;
+                    if (IsReplayPacketOpcodeAllowedForPlayback(myPacket->GetOpcode()))
                     {
-                        replayer->GetSession()->SendPacket(&safePacket);
-                        ++packetsSentThisUpdate;
+                        WorldPacket safePacket;
+                        if (BuildViewerSafeReplayPacket(*myPacket, replayer, session, safePacket))
+                        {
+                            replayer->GetSession()->SendPacket(&safePacket);
+                            ++packetsSentThisUpdate;
+                        }
                     }
+                    match.packets.pop_front();
                 }
-                match.packets.pop_front();
             }
             StripReplayViewerVisualEquipment(replayer, session);
 
@@ -7453,6 +7969,7 @@ namespace
             if (session.teardownInProgress)
                 continue;
 
+            SyncSyntheticReplayActors(replayer, match, session, session.replayPlaybackMs, false);
             SyncReplayActorClones(replayer, match, session, session.replayPlaybackMs);
             UpdateReplayDynamicObjects(replayer, match, session);
             bool actorViewApplied = ApplyActorReplayView(replayer, match, session, session.replayPlaybackMs);

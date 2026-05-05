@@ -612,40 +612,144 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #                     playerbot-backed replay bodies. The module logs the
 #                     player-body plan and currently falls back to backend 0.
 #
-#                     Backend 2 is reserved for a future synthetic player object
-#                     backend and currently falls back to backend 0.
+#                     Backend 2 is synthetic_replay_packet_emitter. This is the
+#                     new safe replay backend: it allocates replay-only fake
+#                     visual GUIDs for every original actor, logs the complete
+#                     synthetic actor plan, keeps the viewer GUID untouched, and
+#                     does not send raw recorded packets or creature actor clones.
+#                     It can emit a first-pass control-safe UNIT visual packet
+#                     stream from captured actor tracks and appearance data.
 #
 #                     Backend 3 is recorded_packet_stream. It disables creature
-#                     actor clones and lets the original recorded object,
-#                     movement, spell, swing, aura, and combat packets be the
-#                     authoritative visual layer. This restores real-looking
-#                     player bodies and client-side animations from the original
-#                     replay stream while copied-map objects and the spectator
-#                     camera remain controlled by the module.
+#                     actor clones and sends the original recorded visual packet
+#                     stream. It can show real-looking players, but it is no
+#                     longer the default because raw packets may carry self,
+#                     active-mover, or control state that can corrupt the viewer
+#                     session if not parsed and rewritten opcode-safely.
 #
-#        Default:     3 - recorded_packet_stream
+#        Default:     2 - synthetic_replay_packet_emitter
 #                     0 - creature_silhouette_debug
 #                     1 - playerbot_body_experimental
-#                     2 - synthetic_player_object_experimental
+#                     3 - recorded_packet_stream
 #
-#        Example:     ArenaReplay.ActorVisual.Backend = 3
-#                     Uses recorded packet visuals instead of creature clones.
+#        Example:     ArenaReplay.ActorVisual.Backend = 2
+#                     Uses the safe synthetic backend foundation.
 #
-#    ArenaReplay.ActorVisual.RecordedPacketStream.Enable
-#        Description: Explicitly enables recorded-packet visual mode even when
-#                     ActorVisual.Backend is not set to 3. This is a repair
-#                     switch for deployments that already have an older
-#                     ActorVisual.Backend = 0 in their active config.
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Enable
+#        Description: Enables the synthetic replay packet emitter foundation.
+#                     Backend 2 keeps raw recorded packets disabled, keeps clones
+#                     disabled, and creates a stable originalGuid -> visualGuid
+#                     plan for every replay actor. The first emitter stage sends
+#                     synthetic UNIT create/movement packets only, never active
+#                     mover or self-control packets.
 #
-#                     Recorded-packet visual mode is the current preferred
-#                     backend because creature clones cannot render real player
-#                     appearance or animation faithfully.
-#
-#        Default:     1 - Enabled with this distribution
+#        Default:     1 - Enabled
 #                     0 - Disabled
 #
-#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 1
-#                     Uses original recorded packets for real player visuals.
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Enable = 1
+#                     Enables synthetic replay backend planning logs.
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.DestroyVisualsOnTeardown
+#        Description: Sends out-of-range updates for synthetic replay visual
+#                     GUIDs before replay teardown. This prevents stale fake
+#                     actor objects from surviving map return/exit.
+#
+#        Default:     1 - Destroy/release synthetic visuals on replay end
+#                     0 - Do not explicitly destroy synthetic visuals
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.DestroyVisualsOnTeardown = 1
+#
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.EmitUnitVisualPackets
+#        Description: Emits first-pass synthetic UNIT create and movement updates
+#                     for replay actors using fake replay-only visual GUIDs.
+#
+#                     This is intentionally not TYPEID_PLAYER yet. It is safer
+#                     because it cannot become the viewer client's active mover
+#                     or controlled character. It is the first visible synthetic
+#                     packet layer and should replace unsafe raw packet playback
+#                     during Option C testing.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled, planning/logging only
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.EmitUnitVisualPackets = 1
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.SyncMs
+#        Description: Minimum cadence for synthetic UNIT movement packets. Lower
+#                     values follow actor tracks more closely but send more
+#                     packets.
+#
+#        Default:     125
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.SyncMs = 125
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitEntry
+#        Description: Creature template entry used only as the client-side UNIT
+#                     entry identity in synthetic packets. It is not spawned as a
+#                     server creature clone.
+#
+#        Default:     98501
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitEntry = 98501
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.GuidLowBase
+#        Description: Low-guid base used for session-local synthetic UNIT visual GUIDs.
+#                     The high-guid portion is encoded as UNIT/Creature (0xF130) so the
+#                     client treats replay actors as remote unit visuals, not player/self movers.
+#
+#        Default:     14680064
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.GuidLowBase = 14680064
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UsePlayerDisplayIds
+#        Description: Allows synthetic UNIT visuals to use captured raw player display IDs.
+#                     Disabled by default because player display IDs on non-player UNIT visuals
+#                     can render as pale/white bodies on some 3.3.5 clients.
+#
+#        Default:     0 - Use safe fallback displays
+#                     1 - Use captured player display IDs when available
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UsePlayerDisplayIds = 0
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseNpcRaceFallbackDisplays
+#        Description: Uses stable textured NPC/race fallback displays for the first synthetic UNIT test.
+#                     This favors safe visible actors over exact player armor until the future
+#                     synthetic PLAYER-object emitter is implemented.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseNpcRaceFallbackDisplays = 1
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseShapeshiftDisplays
+#        Description: Allows captured shapeshift display IDs to override fallback displays when present.
+#
+#        Default:     1 - Enabled
+#                     0 - Disabled
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseShapeshiftDisplays = 1
+#
+#    ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags
+#        Description: UNIT_FIELD_FLAGS used for synthetic visual units. The
+#                     default keeps the unit nonattackable/immune/nonselectable
+#                     so it is display-only and cannot be interacted with.
+#
+#        Default:     33555202
+#
+#        Example:     ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags = 33555202
+#
+#    ArenaReplay.ActorVisual.RecordedPacketStream.Enable
+#        Description: Enables recorded-packet visual mode only when
+#                     ActorVisual.Backend is set to 3. Backend 2 intentionally
+#                     ignores this switch so stale active configs cannot force
+#                     unsafe raw packet playback while synthetic mode is selected.
+#
+#        Default:     0 - Disabled with this distribution
+#                     1 - Enabled when Backend = 3
+#
+#        Example:     ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 0
+#                     Keeps raw recorded packet playback disabled by default.
 #
 #    ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets
 #        Description: Records visual packets from every arena participant instead
@@ -877,8 +981,22 @@ ArenaReplay.Playback.CloneMode.MatchOpenFromFirstActorFrame = 1
 #        Example:     ArenaReplay.ActorVisual.PlayerBody.UseCapturedCustomization = 1
 #                     Future replay bodies use captured customization.
 #
-ArenaReplay.ActorVisual.Backend = 3
-ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 1
+ArenaReplay.ActorVisual.Backend = 2
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Enable = 1
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.DestroyVisualsOnTeardown = 1
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.EmitUnitVisualPackets = 1
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.SyncMs = 125
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitEntry = 98501
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.GuidLowBase = 14680064
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UsePlayerDisplayIds = 0
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseNpcRaceFallbackDisplays = 1
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UseShapeshiftDisplays = 1
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags = 33555202
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.UnitFlags2 = 0
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Faction = 35
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Level = 19
+ArenaReplay.ActorVisual.SyntheticReplayPacketEmitter.Health = 100
+ArenaReplay.ActorVisual.RecordedPacketStream.Enable = 0
 ArenaReplay.ActorVisual.RecordedPacketStream.RecordAllParticipantPackets = 1
 ArenaReplay.ActorVisual.RecordedPacketStream.MaxPacketsPerReplay = 25000
 ArenaReplay.ActorVisual.RecordedPacketStream.RequirePackets = 1
